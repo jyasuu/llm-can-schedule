@@ -3,7 +3,9 @@
 use crate::scheduler::SchedulingProblem;
 use anyhow::Result;
 use std::fs;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
     pub problem: SchedulingProblem,
     pub makespan: usize,

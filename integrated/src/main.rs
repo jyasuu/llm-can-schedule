@@ -2,10 +2,7 @@
 // Integrated pipeline: Load Data → Train → Schedule → Evaluate
 
 use anyhow::{Result, Context};
-use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
-use std::collections::HashMap;
 use clap::{Parser, Subcommand};
 use rand::Rng;
 
@@ -21,7 +18,6 @@ use model::{TransformerLLM, LLMConfig};
 use trainer::ModelTrainer;
 use inference::ScheduleInference;
 use scheduler::{SchedulingProblem, GreedyScheduler};
-use metrics::SolutionMetrics;
 
 // ============================================================================
 // CLI Configuration
@@ -274,14 +270,14 @@ fn schedule_command(
 
     // Compare
     println!("\n--- Comparison ---");
-    let llm_metrics = llm_solution.metrics();
-    let baseline_metrics = baseline_solution.metrics();
+    let llm_makespan = llm_solution.makespan;
+    let baseline_makespan = baseline_solution.makespan;
 
-    println!("LLM Makespan: {}", llm_metrics.makespan);
-    println!("Baseline Makespan: {}", baseline_metrics.makespan);
+    println!("LLM Makespan: {}", llm_makespan);
+    println!("Baseline Makespan: {}", baseline_makespan);
 
-    if baseline_metrics.makespan > 0 {
-        let improvement = 1.0 - (llm_metrics.makespan as f32 / baseline_metrics.makespan as f32);
+    if baseline_makespan > 0 {
+        let improvement = 1.0 - (llm_makespan as f32 / baseline_makespan as f32);
         println!("Improvement: {:.2}%", improvement * 100.0);
     }
 
@@ -319,32 +315,32 @@ fn pipeline_command(
 
         // LLM solution
         let llm_solution = inference.schedule(&problem)?;
-        let llm_metrics = llm_solution.metrics();
+        let llm_makespan = llm_solution.makespan;
 
         // Baseline
         let baseline_solution = GreedyScheduler::schedule(&problem);
-        let baseline_metrics = baseline_solution.metrics();
+        let baseline_makespan = baseline_solution.makespan;
 
         // Calculate improvement
-        let improvement = if baseline_metrics.makespan > 0 {
-            1.0 - (llm_metrics.makespan as f32 / baseline_metrics.makespan as f32)
+        let improvement = if baseline_makespan > 0 {
+            1.0 - (llm_makespan as f32 / baseline_makespan as f32)
         } else {
             0.0
         };
 
-        println!("  LLM Makespan: {}", llm_metrics.makespan);
-        println!("  Baseline Makespan: {}", baseline_metrics.makespan);
+        println!("  LLM Makespan: {}", llm_makespan);
+        println!("  Baseline Makespan: {}", baseline_makespan);
         println!("  Improvement: {:.2}%", improvement * 100.0);
 
-        results.push((llm_metrics.makespan, baseline_metrics.makespan, improvement));
+        results.push((llm_makespan, baseline_makespan, improvement));
     }
 
     // Summary statistics
     println!("\n{}\nSummary Statistics\n{}", "=".repeat(70), "=".repeat(70));
 
     let avg_improvement = results.iter().map(|(_, _, i)| i).sum::<f32>() / results.len() as f32;
-    let max_improvement = results.iter().map(|(_, _, i)| i).fold(f32::NEG_INFINITY, f32::max);
-    let min_improvement = results.iter().map(|(_, _, i)| i).fold(f32::INFINITY, f32::min);
+    let max_improvement = results.iter().map(|(_, _, i)| i).fold(f32::NEG_INFINITY, |arg0: f32, other: &f32| f32::max(arg0, *other));
+    let min_improvement = results.iter().map(|(_, _, i)| i).fold(f32::INFINITY, |arg0: f32, other: &f32| f32::min(arg0, *other));
 
     println!("Average Improvement: {:.2}%", avg_improvement * 100.0);
     println!("Max Improvement: {:.2}%", max_improvement * 100.0);

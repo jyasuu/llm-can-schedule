@@ -17,7 +17,7 @@ pub struct Operation {
     pub duration: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulingProblem {
     pub num_jobs: usize,
     pub num_machines: usize,
