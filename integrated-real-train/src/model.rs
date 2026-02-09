@@ -2,8 +2,8 @@
 // Real Candle Model with Actual Neural Network
 
 use anyhow::Result;
-use candle::{Device, Tensor, DType};
-use candle::nn::{Module, Linear, VarBuilder};
+use candle_core::{Device, Tensor, DType};
+use candle_nn::{Module, Linear, VarBuilder};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]

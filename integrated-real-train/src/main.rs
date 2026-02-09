@@ -179,7 +179,7 @@ fn train_command(
         dropout_rate: 0.1,
     };
 
-    let device = candle::Device::cuda_if_available(0).unwrap_or(candle::Device::Cpu);
+    let device = candle_core::Device::cuda_if_available(0).unwrap_or(candle_core::Device::Cpu);
     println!("Using device: {:?}", device);
 
     let model = TransformerLLM::new(config, &device)

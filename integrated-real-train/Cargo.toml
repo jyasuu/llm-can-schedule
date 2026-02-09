@@ -10,9 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 # Candle ML Framework - REAL training with loss computation
-candle-core = { version = "0.3" } # , features = ["cuda"]
-candle-nn = "0.3"
-candle-transformers = "0.3"
+candle-core = { version = "0.8", default-features = false } # , features = ["cuda"]
+candle-nn = { version = "0.8", default-features = false }
+candle-transformers = "0.8"
+# Optimization
+candle-optimisers = "0.8"
 
 # CLI and config
 clap = { version = "4.4", features = ["derive"] }
@@ -23,17 +25,16 @@ serde_json = "1.0"
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
-rand = "0.8"
+rand = "0.9"
+rand_distr = "0.5"
 chrono = "0.4"
 
 # Tokenization
-tokenizers = { version = "0.22.2", features = ["onig"] }
+tokenizers = { version = "0.22", features = ["onig"] }
 
 # Linear algebra
 ndarray = "0.15"
 
-# Optimization
-candle-optimisers = "0.3"
 
 # [features]
 # default = ["cuda"]

@@ -3,8 +3,8 @@
 use crate::dataset::StarjobDataset;
 use crate::model::TransformerLLM;
 use anyhow::Result;
-use candle::{Device, Tensor, DType};
-use candle::nn::{Optimizer, AdamW};
+use candle_core::{Device, Tensor, DType};
+use candle_nn::{Optimizer, AdamW};
 use std::fs;
 
 pub struct CandelTrainer {
