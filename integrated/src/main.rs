@@ -265,7 +265,7 @@ fn schedule_command(
     // Generate solution
     println!("\n--- Generating LLM Solution ---");
     let llm_solution = inference.schedule(&problem)?;
-    println!("LLM Solution:\n{}", llm_solution);
+    println!("LLM Solution:\n{:?}", llm_solution);
 
     // Generate baseline
     println!("\n--- Generating Baseline Solution ---");
