@@ -25,7 +25,7 @@ impl Comparator {
         } else {
             0.0
         };
-        
+
         ComparisonResult {
             llm_makespan: llm.makespan,
             baseline_makespan: baseline.makespan,

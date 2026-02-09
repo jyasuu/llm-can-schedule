@@ -1,23 +1,23 @@
 // Complete JSSP Training + Scheduling in One Rust Binary
 // Integrated pipeline: Load Data → Train → Schedule → Evaluate
 
-use anyhow::{Result, Context};
-use std::fs;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rand::Rng;
+use std::fs;
 
 mod dataset;
-mod model;
-mod trainer;
 mod inference;
-mod scheduler;
 mod metrics;
+mod model;
+mod scheduler;
+mod trainer;
 
 use dataset::{JSPInstance, StarjobDataset};
-use model::{TransformerLLM, LLMConfig};
-use trainer::ModelTrainer;
 use inference::ScheduleInference;
-use scheduler::{SchedulingProblem, GreedyScheduler};
+use model::{LLMConfig, TransformerLLM};
+use scheduler::{GreedyScheduler, SchedulingProblem};
+use trainer::ModelTrainer;
 
 // ============================================================================
 // CLI Configuration
@@ -195,8 +195,8 @@ fn train_command(
 
     // Load dataset
     println!("Loading dataset from: {}", dataset_path);
-    let dataset = StarjobDataset::load(dataset_path, num_samples)
-        .context("Failed to load dataset")?;
+    let dataset =
+        StarjobDataset::load(dataset_path, num_samples).context("Failed to load dataset")?;
 
     println!("Loaded {} training examples", dataset.instances.len());
 
@@ -301,8 +301,12 @@ fn pipeline_command(
     train_command(dataset_path, train_samples, &model_path, 1e-4, 8, 3)?;
 
     // Phase 2: Testing
-    println!("\n{}\nPhase 2: Testing on {} Problems\n{}", 
-             "=".repeat(70), test_count, "=".repeat(70));
+    println!(
+        "\n{}\nPhase 2: Testing on {} Problems\n{}",
+        "=".repeat(70),
+        test_count,
+        "=".repeat(70)
+    );
 
     let inference = ScheduleInference::load(&model_path)?;
     let mut results = Vec::new();
@@ -336,11 +340,25 @@ fn pipeline_command(
     }
 
     // Summary statistics
-    println!("\n{}\nSummary Statistics\n{}", "=".repeat(70), "=".repeat(70));
+    println!(
+        "\n{}\nSummary Statistics\n{}",
+        "=".repeat(70),
+        "=".repeat(70)
+    );
 
     let avg_improvement = results.iter().map(|(_, _, i)| i).sum::<f32>() / results.len() as f32;
-    let max_improvement = results.iter().map(|(_, _, i)| i).fold(f32::NEG_INFINITY, |arg0: f32, other: &f32| f32::max(arg0, *other));
-    let min_improvement = results.iter().map(|(_, _, i)| i).fold(f32::INFINITY, |arg0: f32, other: &f32| f32::min(arg0, *other));
+    let max_improvement = results
+        .iter()
+        .map(|(_, _, i)| i)
+        .fold(f32::NEG_INFINITY, |arg0: f32, other: &f32| {
+            f32::max(arg0, *other)
+        });
+    let min_improvement = results
+        .iter()
+        .map(|(_, _, i)| i)
+        .fold(f32::INFINITY, |arg0: f32, other: &f32| {
+            f32::min(arg0, *other)
+        });
 
     println!("Average Improvement: {:.2}%", avg_improvement * 100.0);
     println!("Max Improvement: {:.2}%", max_improvement * 100.0);
