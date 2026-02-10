@@ -26,23 +26,22 @@ pub struct TransformerLLM {
 
 impl TransformerLLM {
     pub fn new(config: LLMConfig, device: &Device) -> Result<Self> {
-        let vs = VarBuilder::zeros(DType::F32, device)?;
+        let vs = VarBuilder::zeros(DType::F32, device);
 
         // Embedding layer
         let embedding = Linear::new(
             config.vocab_size,
             config.hidden_dim,
             vs.pp("embedding"),
-        )?;
+        );
 
         // Hidden layers
         let mut layers = Vec::new();
         for i in 0..config.num_layers {
             let layer = Linear::new(
                 config.hidden_dim,
-                config.hidden_dim,
                 vs.pp(format!("layer_{}", i)),
-            )?;
+            );
             layers.push(Arc::new(layer));
         }
 
@@ -51,7 +50,7 @@ impl TransformerLLM {
             config.hidden_dim,
             config.vocab_size,
             vs.pp("output"),
-        )?;
+        );
 
         println!("Model created:");
         println!("  Embedding: {} -> {}", config.vocab_size, config.hidden_dim);

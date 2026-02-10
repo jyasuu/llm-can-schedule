@@ -5,7 +5,6 @@
 use anyhow::{Result, Context};
 use std::fs;
 use clap::{Parser, Subcommand};
-use rand::Rng;
 
 mod dataset;
 mod model;
@@ -318,7 +317,7 @@ fn generate_data_command(count: usize, output_path: &str) -> Result<()> {
     println!("Generating {} demo instances...", count);
 
     let mut instances = Vec::new();
-    let mut _rng = rand::thread_rng();
+    let mut _rng = rand::rng();
 
     for i in 0..count {
         let num_jobs = 2 + (i % 5);

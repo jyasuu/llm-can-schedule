@@ -26,18 +26,18 @@ pub struct SchedulingProblem {
 
 impl SchedulingProblem {
     /// Generate random problem
-    pub fn random(num_jobs: usize, num_machines: usize, seed: u64) -> Self {
-        let mut rng = rand::thread_rng();
+    pub fn random(num_jobs: usize, num_machines: usize, _seed: u64) -> Self {
+        let mut rng = rand::rng();
 
         let mut jobs = Vec::new();
         for job_id in 0..num_jobs {
-            let num_ops = rng.gen_range(2..std::cmp::min(5, num_machines + 1));
+            let num_ops = rng.random_range(2..std::cmp::min(5, num_machines + 1));
             let mut operations = Vec::new();
 
             for _ in 0..num_ops {
                 operations.push(Operation {
-                    machine_id: rng.gen_range(0..num_machines),
-                    duration: rng.gen_range(1..20),
+                    machine_id: rng.random_range(0..num_machines),
+                    duration: rng.random_range(1..20),
                 });
             }
 
