@@ -3,6 +3,17 @@ name = "jssp-lora-solver"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "jssp-lora-solver"
+path = "src/main.rs"
+[[bin]]
+name = "jssp-lora-solver-with-starjob"
+path = "src/main_with_starjob.rs"
+[[bin]]
+name = "train-with-base"
+path = "src/train_with_base.rs"
+
+
 [dependencies]
 candle-core = { version = "0.8" } # , features = ["cuda"]
 candle-nn = "0.8"
