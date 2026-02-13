@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use candle_core::{Device, Tensor};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JSSPInstance {
@@ -54,12 +53,8 @@ impl JSSPInstance {
         features.push(self.num_machines as f32);
 
         // Normalize and add processing times
-        let max_time = *self
-            .processing_times
-            .iter()
-            .max()
-            .unwrap_or(&1) as f32;
-        
+        let max_time = *self.processing_times.iter().max().unwrap_or(&1) as f32;
+
         for &time in &self.processing_times {
             features.push((time as f32) / max_time);
         }
@@ -135,7 +130,7 @@ impl Schedule {
     /// Create schedule from model output tensor
     pub fn from_tensor(tensor: &Tensor) -> Result<Self> {
         let data = tensor.to_vec1::<f32>()?;
-        
+
         // Extract makespan (first element)
         let makespan = data[0].max(1.0) as u32;
 
@@ -204,7 +199,7 @@ impl JSSPSolver {
         use rand::seq::SliceRandom;
 
         let mut sequence: Vec<usize> = (0..instance.num_jobs).collect();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         sequence.shuffle(&mut rng);
 
         Schedule::from_sequence(instance, sequence)

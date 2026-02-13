@@ -1,5 +1,5 @@
+use crate::jssp::{JSSPInstance, JSSPSolver, Schedule};
 use anyhow::Result;
-use crate::jssp::{JSSPInstance, Schedule, JSSPSolver};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,11 +83,7 @@ fn create_3x2_variant() -> Result<JSSPInstance> {
         5, 4, // Job 2
     ];
 
-    let machine_sequences = vec![
-        vec![0, 1],
-        vec![0, 1],
-        vec![0, 1],
-    ];
+    let machine_sequences = vec![vec![0, 1], vec![0, 1], vec![0, 1]];
 
     JSSPInstance::new(3, 2, processing_times, machine_sequences)
 }
@@ -96,12 +92,9 @@ fn create_3x2_variant() -> Result<JSSPInstance> {
 fn create_4x3_instance() -> Result<JSSPInstance> {
     let processing_times = vec![
         // Job 0
-        4, 3, 2,
-        // Job 1
-        3, 4, 1,
-        // Job 2
-        2, 5, 3,
-        // Job 3
+        4, 3, 2, // Job 1
+        3, 4, 1, // Job 2
+        2, 5, 3, // Job 3
         3, 2, 4,
     ];
 
@@ -119,21 +112,13 @@ fn create_4x3_instance() -> Result<JSSPInstance> {
 fn create_4x3_variant() -> Result<JSSPInstance> {
     let processing_times = vec![
         // Job 0
-        5, 2, 3,
-        // Job 1
-        2, 4, 2,
-        // Job 2
-        3, 3, 5,
-        // Job 3
+        5, 2, 3, // Job 1
+        2, 4, 2, // Job 2
+        3, 3, 5, // Job 3
         4, 3, 2,
     ];
 
-    let machine_sequences = vec![
-        vec![0, 1, 2],
-        vec![1, 0, 2],
-        vec![2, 1, 0],
-        vec![0, 1, 2],
-    ];
+    let machine_sequences = vec![vec![0, 1, 2], vec![1, 0, 2], vec![2, 1, 0], vec![0, 1, 2]];
 
     JSSPInstance::new(4, 3, processing_times, machine_sequences)
 }
@@ -142,14 +127,10 @@ fn create_4x3_variant() -> Result<JSSPInstance> {
 fn create_5x3_instance() -> Result<JSSPInstance> {
     let processing_times = vec![
         // Job 0
-        4, 3, 2,
-        // Job 1
-        3, 4, 1,
-        // Job 2
-        2, 5, 3,
-        // Job 3
-        3, 2, 4,
-        // Job 4
+        4, 3, 2, // Job 1
+        3, 4, 1, // Job 2
+        2, 5, 3, // Job 3
+        3, 2, 4, // Job 4
         5, 1, 3,
     ];
 
@@ -171,11 +152,15 @@ mod tests {
     #[test]
     fn test_load_sample_data() -> Result<()> {
         let dataset = load_sample_data()?;
-        
+
         assert_eq!(dataset.instances.len(), 5);
         assert_eq!(dataset.optimal_schedules.len(), 5);
 
-        for (instance, schedule) in dataset.instances.iter().zip(dataset.optimal_schedules.iter()) {
+        for (instance, schedule) in dataset
+            .instances
+            .iter()
+            .zip(dataset.optimal_schedules.iter())
+        {
             assert_eq!(schedule.job_sequence.len(), instance.num_jobs);
             assert!(schedule.makespan > 0);
         }

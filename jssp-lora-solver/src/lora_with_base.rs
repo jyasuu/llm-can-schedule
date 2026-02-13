@@ -1,25 +1,23 @@
 /// LoRA Training with Pre-trained Base Model
-/// 
+///
 /// This module implements LoRA training on top of a pre-trained base model,
 /// similar to the Starjob project's approach with Llama 3.
-/// 
+///
 /// The key difference from basic LoRA:
 /// - Load a pre-trained model (W0)
 /// - Freeze the base model weights
 /// - Train only the LoRA adapters (W_a, W_b)
 /// - Final output: h = W0*x + (α/r)*W_b@W_a@x
-
-use anyhow::{anyhow, Result};
-use candle_core::{DType, Device, Tensor, Module};
-use candle_nn::{VarBuilder, VarMap, Linear};
+use anyhow::Result;
+use candle_core::{DType, Device, Module, Tensor};
+use candle_nn::{Linear, VarBuilder, VarMap};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoRAWithBaseConfig {
-    pub base_model_path: Option<String>,  // Path to pre-trained model weights
-    pub load_pretrained: bool,             // Whether to load pre-trained base model
-    pub freeze_base: bool,                 // Freeze base model weights (LoRA training)
+    pub base_model_path: Option<String>, // Path to pre-trained model weights
+    pub load_pretrained: bool,           // Whether to load pre-trained base model
+    pub freeze_base: bool,               // Freeze base model weights (LoRA training)
     pub lora_rank: usize,
     pub lora_alpha: f64,
     pub dropout: f64,
@@ -50,9 +48,9 @@ pub struct PretrainedModel {
 impl PretrainedModel {
     /// Initialize base model with random weights (simulating pre-trained)
     pub fn new_simulated(vb: &VarBuilder, frozen: bool) -> Result<Self> {
-        let layer1 = candle_nn::linear(256, 512, vb.push_scope("base_layer_1"))?;
-        let layer2 = candle_nn::linear(512, 512, vb.push_scope("base_layer_2"))?;
-        let layer3 = candle_nn::linear(512, 256, vb.push_scope("base_layer_3"))?;
+        let layer1 = candle_nn::linear(256, 512, vb.pp("base_layer_1"))?;
+        let layer2 = candle_nn::linear(512, 512, vb.pp("base_layer_2"))?;
+        let layer3 = candle_nn::linear(512, 256, vb.pp("base_layer_3"))?;
 
         Ok(Self {
             layers: vec![layer1, layer2, layer3],
@@ -74,7 +72,7 @@ impl PretrainedModel {
         for (i, layer) in self.layers.iter().enumerate() {
             let layer_out = layer.forward(&output)?;
             output = if i < self.layers.len() - 1 {
-                candle_nn::ops::relu(&layer_out)?
+                layer_out.relu()?
             } else {
                 layer_out
             };
@@ -90,24 +88,20 @@ pub struct LoRAAdapters {
 }
 
 pub struct LoRAAdapterLayer {
-    pub w_a: Tensor,  // Input → rank
-    pub w_b: Tensor,  // Rank → output
+    pub w_a: Tensor, // Input → rank
+    pub w_b: Tensor, // Rank → output
     pub alpha: f64,
     pub rank: usize,
 }
 
 impl LoRAAdapters {
     pub fn new(vb: &VarBuilder, config: &LoRAWithBaseConfig) -> Result<Self> {
-        let layer_dims = vec![
-            (256, 512),
-            (512, 512),
-            (512, 256),
-        ];
+        let layer_dims = vec![(256, 512), (512, 512), (512, 256)];
 
         let mut layers = Vec::new();
 
         for (i, (in_dim, out_dim)) in layer_dims.iter().enumerate() {
-            let layer_vb = vb.push_scope(format!("lora_adapter_{}", i));
+            let layer_vb = vb.pp(format!("lora_adapter_{}", i));
 
             // Initialize W_a and W_b with small random values
             let w_a = layer_vb.get((*in_dim, config.lora_rank), "w_a")?;
@@ -130,15 +124,15 @@ impl LoRAAdapters {
 
         for (i, layer) in self.layers.iter().enumerate() {
             // Compute: (α/r) * W_b @ W_a @ input
-            let adapter_out = x.matmul(&layer.w_a)?;     // (batch, rank)
-            let adapter_out = adapter_out.matmul(&layer.w_b)?;  // (batch, out_dim)
+            let adapter_out = x.matmul(&layer.w_a)?; // (batch, rank)
+            let adapter_out = adapter_out.matmul(&layer.w_b)?; // (batch, out_dim)
 
             // Scale by alpha/rank
             let scale = layer.alpha / (layer.rank as f64);
             let adapter_out = (&adapter_out * scale)?;
 
             output = if i < self.layers.len() - 1 {
-                candle_nn::ops::relu(&adapter_out)?
+                adapter_out.relu()?
             } else {
                 adapter_out
             };
@@ -157,10 +151,7 @@ pub struct LoRAWithBase {
 
 impl LoRAWithBase {
     /// Initialize LoRA with base model
-    pub fn new(
-        device: &Device,
-        config: LoRAWithBaseConfig,
-    ) -> Result<Self> {
+    pub fn new(device: &Device, config: LoRAWithBaseConfig) -> Result<Self> {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
 
@@ -214,7 +205,7 @@ impl LoRAWithBase {
 
     /// Get total parameters (base + adapters)
     pub fn get_total_params_count(&self) -> usize {
-        let base_count = self.base_model.layers.len() * 256 * 512;  // Approximate
+        let base_count = self.base_model.layers.len() * 256 * 512; // Approximate
         let trainable_count = self.get_trainable_params_count();
         base_count + trainable_count
     }
@@ -241,10 +232,14 @@ impl LoRAWithBase {
 
         println!("\nTotal:");
         println!("  Total parameters: {}", total);
-        println!("  Parameter efficiency: {:.1}%", 
-                 (trainable as f64 / total as f64) * 100.0);
-        println!("  Reduction vs full training: {:.1}%",
-                 ((total - trainable) as f64 / total as f64) * 100.0);
+        println!(
+            "  Parameter efficiency: {:.1}%",
+            (trainable as f64 / total as f64) * 100.0
+        );
+        println!(
+            "  Reduction vs full training: {:.1}%",
+            ((total - trainable) as f64 / total as f64) * 100.0
+        );
     }
 }
 
@@ -274,11 +269,8 @@ mod tests {
         let model = LoRAWithBase::new(&device, config)?;
 
         // Create dummy input (batch_size=2, input_dim=256)
-        let input_data: Vec<f32> = (0..512)
-            .map(|i| (i as f32) / 1000.0)
-            .collect();
-        let input = Tensor::new(&input_data, &device)?
-            .reshape((2, 256))?;
+        let input_data: Vec<f32> = (0..512).map(|i| (i as f32) / 1000.0).collect();
+        let input = Tensor::new(&input_data, &device)?.reshape((2, 256))?;
 
         let output = model.forward(&input)?;
 

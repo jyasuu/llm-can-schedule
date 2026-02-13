@@ -1,16 +1,15 @@
+use crate::jssp::JSSPInstance;
 /// Starjob Dataset Loader
-/// 
+///
 /// This module provides functionality to load the Starjob130k dataset
 /// from the JSON file format provided by the Starjob project.
 ///
 /// Dataset source: https://github.com/starjob42/Starjob
 /// Hugging Face: https://huggingface.co/datasets/henri24/Starjob
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use crate::jssp::{JSSPInstance, Schedule};
 
 /// Raw Starjob entry from JSON
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,14 +30,14 @@ pub struct StarjobDataset {
 }
 
 /// Load Starjob dataset from JSON file
-/// 
+///
 /// # Arguments
 /// * `path` - Path to starjob130k.json file
 /// * `limit` - Optional limit on number of instances to load (None = load all)
-/// 
+///
 /// # Returns
 /// * `StarjobDataset` - Loaded instances and raw entries
-/// 
+///
 /// # Example
 /// ```rust
 /// let dataset = load_starjob_dataset("data/starjob130k.json", Some(100))?;
@@ -46,10 +45,10 @@ pub struct StarjobDataset {
 /// ```
 pub fn load_starjob_dataset(path: &str, limit: Option<usize>) -> Result<StarjobDataset> {
     println!("Loading Starjob dataset from: {}", path);
-    
+
     // Read file
-    let file_content = fs::read_to_string(path)
-        .map_err(|e| anyhow!("Failed to read file {}: {}", path, e))?;
+    let file_content =
+        fs::read_to_string(path).map_err(|e| anyhow!("Failed to read file {}: {}", path, e))?;
 
     // Parse JSON
     let entries = parse_starjob_json(&file_content, limit)?;
@@ -78,10 +77,7 @@ pub fn load_starjob_dataset(path: &str, limit: Option<usize>) -> Result<StarjobD
         println!("Failed to convert {} entries", failed_count);
     }
 
-    Ok(StarjobDataset {
-        instances,
-        entries,
-    })
+    Ok(StarjobDataset { instances, entries })
 }
 
 /// Parse JSON file containing Starjob entries
@@ -143,7 +139,7 @@ fn parse_starjob_json(content: &str, limit: Option<usize>) -> Result<Vec<Starjob
 }
 
 /// Convert Starjob entry to JSSP instance
-/// 
+///
 /// Starjob matrix format:
 /// [job0_m0, job0_m1, ..., job0_mn, job1_m0, job1_m1, ..., job1_mn, ...]
 fn convert_entry_to_instance(entry: &StarjobEntry) -> Result<JSSPInstance> {
@@ -151,7 +147,9 @@ fn convert_entry_to_instance(entry: &StarjobEntry) -> Result<JSSPInstance> {
     let num_machines = entry.num_machines as usize;
 
     // Extract processing times from matrix
-    let processing_times: Vec<u32> = entry.matrix.iter()
+    let processing_times: Vec<u32> = entry
+        .matrix
+        .iter()
         .flat_map(|row| row.iter())
         .map(|&t| t as u32)
         .collect();
@@ -167,15 +165,13 @@ fn convert_entry_to_instance(entry: &StarjobEntry) -> Result<JSSPInstance> {
 
     // Generate sequential machine ordering
     // (Each job visits machines in order 0, 1, 2, ...)
-    let machine_sequences = (0..num_jobs)
-        .map(|_| (0..num_machines).collect())
-        .collect();
+    let machine_sequences = (0..num_jobs).map(|_| (0..num_machines).collect()).collect();
 
     JSSPInstance::new(num_jobs, num_machines, processing_times, machine_sequences)
 }
 
 /// Convert Starjob entry with custom machine ordering
-/// 
+///
 /// Useful when you have specific machine sequences in the data
 pub fn convert_entry_with_sequences(
     entry: &StarjobEntry,
@@ -184,7 +180,9 @@ pub fn convert_entry_with_sequences(
     let num_jobs = entry.num_jobs as usize;
     let num_machines = entry.num_machines as usize;
 
-    let processing_times: Vec<u32> = entry.matrix.iter()
+    let processing_times: Vec<u32> = entry
+        .matrix
+        .iter()
         .flat_map(|row| row.iter())
         .map(|&t| t as u32)
         .collect();
@@ -209,7 +207,7 @@ pub fn convert_entry_with_sequences(
 }
 
 /// Load a subset of Starjob dataset by size (number of jobs/machines)
-/// 
+///
 /// # Arguments
 /// * `path` - Path to starjob130k.json
 /// * `min_jobs` - Minimum number of jobs
@@ -227,7 +225,8 @@ pub fn load_starjob_by_size(
 ) -> Result<StarjobDataset> {
     let full_dataset = load_starjob_dataset(path, None)?;
 
-    let filtered_instances: Vec<JSSPInstance> = full_dataset.instances
+    let filtered_instances: Vec<JSSPInstance> = full_dataset
+        .instances
         .iter()
         .filter(|inst| {
             inst.num_jobs >= min_jobs
@@ -239,7 +238,8 @@ pub fn load_starjob_by_size(
         .cloned()
         .collect();
 
-    let filtered_entries: Vec<StarjobEntry> = full_dataset.entries
+    let filtered_entries: Vec<StarjobEntry> = full_dataset
+        .entries
         .iter()
         .zip(full_dataset.instances.iter())
         .filter_map(|(entry, inst)| {
@@ -272,7 +272,10 @@ pub fn load_starjob_by_size(
 }
 
 /// Load Starjob dataset and compute statistics
-pub fn load_and_analyze_starjob(path: &str, sample_size: Option<usize>) -> Result<StarjobStatistics> {
+pub fn load_and_analyze_starjob(
+    path: &str,
+    sample_size: Option<usize>,
+) -> Result<StarjobStatistics> {
     let dataset = load_starjob_dataset(path, sample_size)?;
 
     let mut job_counts = std::collections::HashMap::new();
@@ -281,9 +284,7 @@ pub fn load_and_analyze_starjob(path: &str, sample_size: Option<usize>) -> Resul
 
     for instance in &dataset.instances {
         *job_counts.entry(instance.num_jobs).or_insert(0) += 1;
-        *machine_counts
-            .entry(instance.num_machines)
-            .or_insert(0) += 1;
+        *machine_counts.entry(instance.num_machines).or_insert(0) += 1;
         processing_times.extend(&instance.processing_times);
     }
 

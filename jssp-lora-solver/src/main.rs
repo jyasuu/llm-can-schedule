@@ -1,16 +1,15 @@
-use anyhow::{Ok as AnyOk, Result};
+use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-mod lora;
-mod jssp;
 mod data;
+mod jssp;
+mod lora;
 
+use data::load_sample_data;
+use jssp::{JSSPInstance, Schedule};
 use lora::{LoRA, LoRAConfig};
-use jssp::{JSSPInstance, JSSPSolver, Schedule};
-use data::{JSSPDataset, load_sample_data};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
@@ -45,7 +44,7 @@ impl JSSPLoRASolver {
     fn new(device: Device, config: TrainingConfig) -> Result<Self> {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-        
+
         let lora_config = LoRAConfig {
             rank: config.lora_rank,
             alpha: config.lora_alpha,
@@ -61,7 +60,11 @@ impl JSSPLoRASolver {
         })
     }
 
-    fn train_on_instance(&mut self, instance: &JSSPInstance, optimal_schedule: &Schedule) -> Result<f32> {
+    fn train_on_instance(
+        &mut self,
+        instance: &JSSPInstance,
+        optimal_schedule: &Schedule,
+    ) -> Result<f32> {
         // Encode the JSSP instance
         let input = instance.encode()?;
         let input_tensor = Tensor::new(&input, &self.device)?;
@@ -107,8 +110,10 @@ fn main() -> Result<()> {
 
     // Initialize the LoRA solver
     let mut solver = JSSPLoRASolver::new(device.clone(), config.clone())?;
-    println!("Initialized LoRA solver with rank={}, alpha={}\n", 
-             config.lora_rank, config.lora_alpha);
+    println!(
+        "Initialized LoRA solver with rank={}, alpha={}\n",
+        config.lora_rank, config.lora_alpha
+    );
 
     // Training loop
     println!("Starting training...\n");
@@ -136,19 +141,26 @@ fn main() -> Result<()> {
             }
         }
 
-        let avg_loss = if count > 0 { total_loss / count as f32 } else { 0.0 };
+        let avg_loss = if count > 0 {
+            total_loss / count as f32
+        } else {
+            0.0
+        };
         println!("Epoch {}: Average Loss = {:.6}\n", epoch + 1, avg_loss);
     }
 
     // Test the trained model
     println!("\n=== Testing Trained Model ===\n");
-    
+
     if let Some(test_instance) = dataset.instances.first() {
         println!("Test Instance:");
         println!("  Jobs: {}", test_instance.num_jobs);
         println!("  Machines: {}", test_instance.num_machines);
-        println!("  Processing times: {:?}\n", 
-                 &test_instance.processing_times[0..std::cmp::min(5, test_instance.processing_times.len())]);
+        println!(
+            "  Processing times: {:?}\n",
+            &test_instance.processing_times
+                [0..std::cmp::min(5, test_instance.processing_times.len())]
+        );
 
         match solver.solve(&test_instance) {
             Ok(schedule) => {
@@ -173,18 +185,24 @@ fn main() -> Result<()> {
     }
 
     println!("\n=== Solving Multiple Examples ===\n");
-    
+
     // Solve multiple instances
     for (idx, instance) in dataset.instances.iter().take(3).enumerate() {
-        println!("Example {} ({} jobs, {} machines):", 
-                 idx + 1, instance.num_jobs, instance.num_machines);
-        
+        println!(
+            "Example {} ({} jobs, {} machines):",
+            idx + 1,
+            instance.num_jobs,
+            instance.num_machines
+        );
+
         match solver.solve(&instance) {
             Ok(schedule) => {
                 println!("  Generated Makespan: {}", schedule.makespan);
                 if let Some(optimal) = dataset.optimal_schedules.get(idx) {
                     println!("  Optimal Makespan: {}", optimal.makespan);
-                    let gap = ((schedule.makespan - optimal.makespan) as f32 / optimal.makespan as f32) * 100.0;
+                    let gap = ((schedule.makespan - optimal.makespan) as f32
+                        / optimal.makespan as f32)
+                        * 100.0;
                     println!("  Gap to Optimal: {:.2}%\n", gap);
                 }
             }

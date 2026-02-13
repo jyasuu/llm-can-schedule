@@ -1,18 +1,17 @@
-use anyhow::{Ok as AnyOk, Result};
+use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-mod lora;
-mod jssp;
 mod data;
+mod jssp;
+mod lora;
 mod starjob;
 
-use lora::{LoRA, LoRAConfig};
+use data::load_sample_data;
 use jssp::{JSSPInstance, JSSPSolver, Schedule};
-use data::{JSSPDataset, load_sample_data};
-use starjob::{load_starjob_dataset, load_starjob_by_size, load_and_analyze_starjob};
+use lora::{LoRA, LoRAConfig};
+use starjob::{load_and_analyze_starjob, load_starjob_by_size, load_starjob_dataset};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
@@ -47,7 +46,7 @@ impl JSSPLoRASolver {
     fn new(device: Device, config: TrainingConfig) -> Result<Self> {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-        
+
         let lora_config = LoRAConfig {
             rank: config.lora_rank,
             alpha: config.lora_alpha,
@@ -63,7 +62,11 @@ impl JSSPLoRASolver {
         })
     }
 
-    fn train_on_instance(&mut self, instance: &JSSPInstance, optimal_schedule: &Schedule) -> Result<f32> {
+    fn train_on_instance(
+        &mut self,
+        instance: &JSSPInstance,
+        optimal_schedule: &Schedule,
+    ) -> Result<f32> {
         // Encode the JSSP instance
         let input = instance.encode()?;
         let input_tensor = Tensor::new(&input, &self.device)?;
@@ -109,8 +112,10 @@ fn example_with_sample_data() -> Result<()> {
 
     // Initialize the LoRA solver
     let mut solver = JSSPLoRASolver::new(device.clone(), config.clone())?;
-    println!("Initialized LoRA solver with rank={}, alpha={}\n", 
-             config.lora_rank, config.lora_alpha);
+    println!(
+        "Initialized LoRA solver with rank={}, alpha={}\n",
+        config.lora_rank, config.lora_alpha
+    );
 
     // Training loop
     println!("Starting training...\n");
@@ -136,13 +141,17 @@ fn example_with_sample_data() -> Result<()> {
             }
         }
 
-        let avg_loss = if count > 0 { total_loss / count as f32 } else { 0.0 };
+        let avg_loss = if count > 0 {
+            total_loss / count as f32
+        } else {
+            0.0
+        };
         println!("Epoch {}: Average Loss = {:.6}\n", epoch + 1, avg_loss);
     }
 
     // Test the trained model
     println!("\n=== Testing Trained Model ===\n");
-    
+
     if let Some(test_instance) = dataset.instances.first() {
         println!("Test Instance:");
         println!("  Jobs: {}", test_instance.num_jobs);
@@ -193,14 +202,17 @@ fn example_with_starjob_data(json_path: &str, limit: Option<usize>) -> Result<()
     // Load Starjob dataset
     println!("\n=== Loading Starjob Dataset ===");
     let starjob = load_starjob_dataset(json_path, limit)?;
-    println!("Loaded {} instances from Starjob\n", starjob.instances.len());
+    println!(
+        "Loaded {} instances from Starjob\n",
+        starjob.instances.len()
+    );
 
     // Initialize solver
     let config = TrainingConfig {
         learning_rate: 1e-4,
-        epochs: 2,  // Fewer epochs for large dataset
+        epochs: 2, // Fewer epochs for large dataset
         batch_size: 16,
-        lora_rank: 16,  // Larger rank for larger problems
+        lora_rank: 16, // Larger rank for larger problems
         lora_alpha: 32.0,
         dropout: 0.1,
     };
@@ -241,17 +253,29 @@ fn example_with_starjob_data(json_path: &str, limit: Option<usize>) -> Result<()
             }
         }
 
-        let avg_loss = if count > 0 { total_loss / count as f32 } else { 0.0 };
-        println!("Epoch {}: Average Loss = {:.6} ({} instances)\n", 
-                 epoch + 1, avg_loss, instance_count);
+        let avg_loss = if count > 0 {
+            total_loss / count as f32
+        } else {
+            0.0
+        };
+        println!(
+            "Epoch {}: Average Loss = {:.6} ({} instances)\n",
+            epoch + 1,
+            avg_loss,
+            instance_count
+        );
     }
 
     // Test on some Starjob instances
     println!("\n=== Testing on Starjob Instances ===\n");
-    
+
     for (idx, instance) in starjob.instances.iter().take(3).enumerate() {
-        println!("Instance {} ({} jobs, {} machines):",
-                 idx + 1, instance.num_jobs, instance.num_machines);
+        println!(
+            "Instance {} ({} jobs, {} machines):",
+            idx + 1,
+            instance.num_jobs,
+            instance.num_machines
+        );
 
         match solver.solve(&instance) {
             Ok(schedule) => {
@@ -261,7 +285,8 @@ fn example_with_starjob_data(json_path: &str, limit: Option<usize>) -> Result<()
                 match JSSPSolver::solve_nearest_neighbor(&instance) {
                     Ok(nn_schedule) => {
                         let gap = ((schedule.makespan as f32 - nn_schedule.makespan as f32)
-                            / nn_schedule.makespan as f32) * 100.0;
+                            / nn_schedule.makespan as f32)
+                            * 100.0;
                         println!("  NN Solver Makespan: {}", nn_schedule.makespan);
                         println!("  Gap to NN: {:.2}%\n", gap);
                     }
@@ -290,8 +315,12 @@ fn example_with_filtered_starjob(json_path: &str) -> Result<()> {
     // Show some examples
     println!("Sample instances:");
     for (idx, instance) in filtered.instances.iter().take(5).enumerate() {
-        println!("  {}: {} jobs × {} machines", 
-                 idx + 1, instance.num_jobs, instance.num_machines);
+        println!(
+            "  {}: {} jobs × {} machines",
+            idx + 1,
+            instance.num_jobs,
+            instance.num_machines
+        );
     }
 
     Ok(())

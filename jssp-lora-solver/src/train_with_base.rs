@@ -1,22 +1,21 @@
 /// JSSP LoRA Training with Pre-trained Base Model
-/// 
+///
 /// This is the recommended approach similar to train_llama_3.py in Starjob project:
 /// 1. Load pre-trained base model (weights frozen)
 /// 2. Initialize LoRA adapters (W_a, W_b are trainable)
 /// 3. Train ONLY the adapters on JSSP dataset
 /// 4. Save trained adapters (much smaller than full model)
-
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
-mod lora_with_base;
 mod jssp;
+mod lora_with_base;
 mod starjob;
 
-use lora_with_base::{LoRAWithBase, LoRAWithBaseConfig};
 use jssp::{JSSPInstance, JSSPSolver, Schedule};
+use lora_with_base::{LoRAWithBase, LoRAWithBaseConfig};
 use starjob::load_starjob_dataset;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +61,7 @@ pub fn train_lora_on_jssp(
 
     for epoch in 0..config.epochs {
         println!("Epoch {}/{}", epoch + 1, config.epochs);
-        
+
         let mut epoch_loss = 0.0;
         let mut batch_count = 0;
         let epoch_start = Instant::now();
@@ -125,10 +124,7 @@ pub fn train_lora_on_jssp(
 }
 
 /// Evaluate model on test set
-pub fn evaluate_lora(
-    model: &LoRAWithBase,
-    test_instances: &[JSSPInstance],
-) -> Result<()> {
+pub fn evaluate_lora(model: &LoRAWithBase, test_instances: &[JSSPInstance]) -> Result<()> {
     println!("\n╔════════════════════════════════════════════════════════╗");
     println!("║           Evaluating LoRA Model                       ║");
     println!("╚════════════════════════════════════════════════════════╝\n");
@@ -150,7 +146,8 @@ pub fn evaluate_lora(
 
         // Calculate gap
         let gap = ((pred_schedule.makespan as f32 - ref_schedule.makespan as f32)
-            / ref_schedule.makespan as f32) * 100.0;
+            / ref_schedule.makespan as f32)
+            * 100.0;
 
         total_gap += gap;
         gap_count += 1;
@@ -186,8 +183,8 @@ fn example_starjob_training() -> Result<()> {
     let device = Device::Cpu;
     let lora_config = LoRAWithBaseConfig {
         base_model_path: Some("models/pretrained_base.safetensors".to_string()),
-        load_pretrained: false,  // Set to true if you have a pretrained model
-        freeze_base: true,        // Freeze base model
+        load_pretrained: false, // Set to true if you have a pretrained model
+        freeze_base: true,      // Freeze base model
         lora_rank: 8,
         lora_alpha: 16.0,
         dropout: 0.1,
@@ -226,7 +223,7 @@ fn example_starjob_training() -> Result<()> {
 
             // Use sample instances for demo
             let sample_instances = create_sample_instances();
-            
+
             let training_config = TrainingConfig::default();
             train_lora_on_jssp(&mut model, &sample_instances, training_config)?;
             evaluate_lora(&model, &sample_instances)?;
@@ -249,16 +246,16 @@ fn example_custom_training() -> Result<()> {
         base_model_path: Some("models/my_custom_model.pt".to_string()),
         load_pretrained: false,
         freeze_base: true,
-        lora_rank: 16,      // Larger rank for custom use
+        lora_rank: 16, // Larger rank for custom use
         lora_alpha: 32.0,
         dropout: 0.1,
         learning_rate: 5e-5,
     };
 
     let mut model = LoRAWithBase::new(&device, lora_config)?;
-    
+
     let instances = create_sample_instances();
-    
+
     let config = TrainingConfig {
         epochs: 5,
         batch_size: 16,
@@ -277,20 +274,32 @@ fn example_custom_training() -> Result<()> {
 fn create_sample_instances() -> Vec<JSSPInstance> {
     vec![
         JSSPInstance::new(
-            3, 2,
+            3,
+            2,
             vec![5, 4, 4, 5, 3, 6],
             vec![vec![0, 1], vec![0, 1], vec![0, 1]],
-        ).unwrap(),
+        )
+        .unwrap(),
         JSSPInstance::new(
-            4, 3,
-            vec![4,3,2, 3,4,1, 2,5,3, 3,2,4],
-            vec![vec![0,1,2], vec![1,2,0], vec![2,0,1], vec![0,2,1]],
-        ).unwrap(),
+            4,
+            3,
+            vec![4, 3, 2, 3, 4, 1, 2, 5, 3, 3, 2, 4],
+            vec![vec![0, 1, 2], vec![1, 2, 0], vec![2, 0, 1], vec![0, 2, 1]],
+        )
+        .unwrap(),
         JSSPInstance::new(
-            5, 3,
-            vec![4,3,2, 3,4,1, 2,5,3, 3,2,4, 5,1,3],
-            vec![vec![0,1,2], vec![1,2,0], vec![2,0,1], vec![0,2,1], vec![1,0,2]],
-        ).unwrap(),
+            5,
+            3,
+            vec![4, 3, 2, 3, 4, 1, 2, 5, 3, 3, 2, 4, 5, 1, 3],
+            vec![
+                vec![0, 1, 2],
+                vec![1, 2, 0],
+                vec![2, 0, 1],
+                vec![0, 2, 1],
+                vec![1, 0, 2],
+            ],
+        )
+        .unwrap(),
     ]
 }
 
