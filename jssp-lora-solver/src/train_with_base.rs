@@ -70,7 +70,8 @@ pub fn train_lora_on_jssp(
             // Encode instance to features
             let input = instance.encode()?;
             let device = Device::Cpu;
-            let input_tensor = Tensor::new(&input, &device)?;
+            let input_tensor = Tensor::new(&input[..], &device)?;
+            
 
             // Forward pass through model (base + LoRA)
             let output = model.forward(&input_tensor)?;
@@ -135,7 +136,7 @@ pub fn evaluate_lora(model: &LoRAWithBase, test_instances: &[JSSPInstance]) -> R
 
     for (idx, instance) in test_instances.iter().enumerate() {
         let input = instance.encode()?;
-        let input_tensor = Tensor::new(&input, &device)?;
+        let input_tensor = Tensor::new(&input[..], &device)?;
 
         // Get model prediction
         let output = model.forward(&input_tensor)?;

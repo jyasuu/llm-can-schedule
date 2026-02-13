@@ -69,7 +69,7 @@ impl JSSPLoRASolver {
     ) -> Result<f32> {
         // Encode the JSSP instance
         let input = instance.encode()?;
-        let input_tensor = Tensor::new(&input, &self.device)?;
+        let input_tensor = Tensor::new(&input[..], &self.device)?;
 
         // Forward pass
         let logits = self.model.forward(&input_tensor)?;
@@ -85,7 +85,7 @@ impl JSSPLoRASolver {
 
     fn solve(&self, instance: &JSSPInstance) -> Result<Schedule> {
         let input = instance.encode()?;
-        let input_tensor = Tensor::new(&input, &self.device)?;
+        let input_tensor = Tensor::new(&input[..], &self.device)?;
 
         let logits = self.model.forward(&input_tensor)?;
         let schedule = Schedule::from_tensor(&logits)?;

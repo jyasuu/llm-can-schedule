@@ -1,5 +1,6 @@
 use anyhow::Result;
 use candle_core::Tensor;
+use candle_core::DType;
 use candle_nn::VarBuilder;
 use std::sync::Arc;
 
@@ -74,7 +75,7 @@ impl LoRA {
 
         let mut layers = Vec::new();
         for (i, (in_dim, out_dim)) in layer_dims.iter().enumerate() {
-            let layer_vb = vb.push_scope(format!("lora_layer_{}", i));
+            let layer_vb = vb.pp(format!("lora_layer_{}", i));
             let layer = LoRALinear::new(&layer_vb, *in_dim, *out_dim, &config)?;
             layers.push(layer);
         }

@@ -124,7 +124,7 @@ impl Schedule {
             tensor_data.push(0.0);
         }
 
-        Tensor::new(&tensor_data[..256], device)
+        Ok(Tensor::new(&tensor_data[..256], device)?)
     }
 
     /// Create schedule from model output tensor
