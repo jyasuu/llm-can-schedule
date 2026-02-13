@@ -126,7 +126,7 @@ fn main() -> Result<()> {
             let optimal_schedule = &dataset.optimal_schedules[idx];
 
             // Train on this instance
-            match solver.train_on_instance(&instance, optimal_schedule) {
+            match solver.train_on_instance(instance, optimal_schedule) {
                 Ok(loss) => {
                     total_loss += loss;
                     count += 1;
@@ -162,7 +162,7 @@ fn main() -> Result<()> {
                 [0..std::cmp::min(5, test_instance.processing_times.len())]
         );
 
-        match solver.solve(&test_instance) {
+        match solver.solve(test_instance) {
             Ok(schedule) => {
                 println!("Generated Schedule:");
                 println!("  Makespan: {}", schedule.makespan);
@@ -195,7 +195,7 @@ fn main() -> Result<()> {
             instance.num_machines
         );
 
-        match solver.solve(&instance) {
+        match solver.solve(instance) {
             Ok(schedule) => {
                 println!("  Generated Makespan: {}", schedule.makespan);
                 if let Some(optimal) = dataset.optimal_schedules.get(idx) {

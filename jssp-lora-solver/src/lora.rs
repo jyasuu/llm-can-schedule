@@ -1,6 +1,5 @@
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_core::DType;
 use candle_nn::VarBuilder;
 use std::sync::Arc;
 
@@ -67,7 +66,7 @@ pub struct LoRA {
 
 impl LoRA {
     pub fn new(vb: &VarBuilder, config: LoRAConfig) -> Result<Self> {
-        let layer_dims = vec![
+        let layer_dims = [
             (256, 512), // Input embedding to hidden
             (512, 512), // Hidden to hidden
             (512, 256), // Hidden to output

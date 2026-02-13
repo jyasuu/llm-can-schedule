@@ -91,7 +91,7 @@ impl Schedule {
             for (step, &machine) in instance.machine_sequences[job].iter().enumerate() {
                 let proc_time = instance.get_processing_time(job, step);
                 let start_time = machine_available[machine].max(completion_times[job]);
-                let end_time = start_time + proc_time as u32;
+                let end_time = start_time + proc_time;
 
                 completion_times[job] = end_time;
                 machine_available[machine] = end_time;

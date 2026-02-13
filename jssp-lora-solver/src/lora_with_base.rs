@@ -96,7 +96,7 @@ pub struct LoRAAdapterLayer {
 
 impl LoRAAdapters {
     pub fn new(vb: &VarBuilder, config: &LoRAWithBaseConfig) -> Result<Self> {
-        let layer_dims = vec![(256, 512), (512, 512), (512, 256)];
+        let layer_dims = [(256, 512), (512, 512), (512, 256)];
 
         let mut layers = Vec::new();
 

@@ -31,7 +31,9 @@ pub fn load_sample_data() -> Result<JSSPDataset> {
             let greedy = JSSPSolver::solve_greedy(instance).ok();
             let nn = JSSPSolver::solve_nearest_neighbor(instance).ok();
 
-            let best = match (greedy, nn) {
+            
+
+            match (greedy, nn) {
                 (Some(g), Some(n)) => {
                     if g.makespan <= n.makespan {
                         g
@@ -46,9 +48,7 @@ pub fn load_sample_data() -> Result<JSSPDataset> {
                     makespan: 0,
                     completion_times: vec![0; instance.num_jobs],
                 },
-            };
-
-            best
+            }
         })
         .collect();
 

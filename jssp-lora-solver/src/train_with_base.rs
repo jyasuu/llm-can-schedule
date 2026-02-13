@@ -77,7 +77,7 @@ pub fn train_lora_on_jssp(
             let output = model.forward(&input_tensor)?;
 
             // Get reference solution
-            let reference = JSSPSolver::solve_nearest_neighbor(&instance)?;
+            let reference = JSSPSolver::solve_nearest_neighbor(instance)?;
             let target = reference.to_tensor(&device)?;
 
             // Compute MSE loss
@@ -143,7 +143,7 @@ pub fn evaluate_lora(model: &LoRAWithBase, test_instances: &[JSSPInstance]) -> R
         let pred_schedule = Schedule::from_tensor(&output)?;
 
         // Get reference solution
-        let ref_schedule = JSSPSolver::solve_nearest_neighbor(&instance)?;
+        let ref_schedule = JSSPSolver::solve_nearest_neighbor(instance)?;
 
         // Calculate gap
         let gap = ((pred_schedule.makespan as f32 - ref_schedule.makespan as f32)

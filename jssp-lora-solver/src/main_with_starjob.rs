@@ -126,7 +126,7 @@ fn example_with_sample_data() -> Result<()> {
         for (idx, instance) in dataset.instances.iter().enumerate() {
             let optimal_schedule = &dataset.optimal_schedules[idx];
 
-            match solver.train_on_instance(&instance, optimal_schedule) {
+            match solver.train_on_instance(instance, optimal_schedule) {
                 Ok(loss) => {
                     total_loss += loss;
                     count += 1;
@@ -157,7 +157,7 @@ fn example_with_sample_data() -> Result<()> {
         println!("  Jobs: {}", test_instance.num_jobs);
         println!("  Machines: {}", test_instance.num_machines);
 
-        match solver.solve(&test_instance) {
+        match solver.solve(test_instance) {
             Ok(schedule) => {
                 println!("Generated Schedule:");
                 println!("  Makespan: {}", schedule.makespan);
@@ -230,9 +230,9 @@ fn example_with_starjob_data(json_path: &str, limit: Option<usize>) -> Result<()
 
         for (idx, instance) in starjob.instances.iter().take(100).enumerate() {
             // Use greedy solver as reference for loss computation
-            match JSSPSolver::solve_nearest_neighbor(&instance) {
+            match JSSPSolver::solve_nearest_neighbor(instance) {
                 Ok(reference_schedule) => {
-                    match solver.train_on_instance(&instance, &reference_schedule) {
+                    match solver.train_on_instance(instance, &reference_schedule) {
                         Ok(loss) => {
                             total_loss += loss;
                             count += 1;
@@ -277,20 +277,17 @@ fn example_with_starjob_data(json_path: &str, limit: Option<usize>) -> Result<()
             instance.num_machines
         );
 
-        match solver.solve(&instance) {
+        match solver.solve(instance) {
             Ok(schedule) => {
                 println!("  Generated Makespan: {}", schedule.makespan);
 
                 // Compare with NN solver
-                match JSSPSolver::solve_nearest_neighbor(&instance) {
-                    Ok(nn_schedule) => {
-                        let gap = ((schedule.makespan as f32 - nn_schedule.makespan as f32)
-                            / nn_schedule.makespan as f32)
-                            * 100.0;
-                        println!("  NN Solver Makespan: {}", nn_schedule.makespan);
-                        println!("  Gap to NN: {:.2}%\n", gap);
-                    }
-                    Err(_) => {}
+                if let Ok(nn_schedule) = JSSPSolver::solve_nearest_neighbor(instance) {
+                    let gap = ((schedule.makespan as f32 - nn_schedule.makespan as f32)
+                        / nn_schedule.makespan as f32)
+                        * 100.0;
+                    println!("  NN Solver Makespan: {}", nn_schedule.makespan);
+                    println!("  Gap to NN: {:.2}%\n", gap);
                 }
             }
             Err(e) => {
