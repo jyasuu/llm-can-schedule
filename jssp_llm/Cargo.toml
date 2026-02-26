@@ -1,0 +1,52 @@
+[package]
+name        = "jssp_llm"
+version     = "0.1.0"
+edition     = "2021"
+description = "JSSP solver using a LoRA-fine-tuned LLM via candle (pure Rust, no Python FFI)"
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+# Default: CPU-only inference (portable).
+# Enable `cuda` for NVIDIA GPU acceleration.
+# Enable `metal` for Apple Silicon acceleration.
+[features]
+default = []
+cuda    = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
+metal   = [
+    "candle-core/metal",
+    "candle-nn/metal",
+    "candle-transformers/metal",
+]
+
+[dependencies]
+# ── Candle ML framework (Hugging Face) ────────────────────────────────────────
+candle-core         = { version = "0.7", features = ["serde"] }
+candle-nn           = { version = "0.7" }
+candle-transformers = { version = "0.7" }
+
+# ── Hugging Face Hub: download model weights & tokenizer ──────────────────────
+hf-hub   = { version = "0.3", features = ["tokio"] }
+
+# ── Tokenizers (HF fast tokenizer, used by Phi-3 / most modern LLMs) ─────────
+tokenizers = { version = "0.19", features = ["http"] }
+
+# ── Async runtime ─────────────────────────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+
+# ── Serialisation ─────────────────────────────────────────────────────────────
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+anyhow   = "1"          # ergonomic error handling
+rand     = "0.8"        # RNG for temperature sampling
+regex    = "1"          # schedule parsing
+clap     = { version = "4", features = ["derive"] }  # CLI flags
+indicatif = "0.17"      # progress bars
+
+[profile.release]
+opt-level = 3
+lto       = "thin"
