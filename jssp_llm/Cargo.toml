@@ -23,9 +23,9 @@ metal   = [
 
 [dependencies]
 # ── Candle ML framework (Hugging Face) ────────────────────────────────────────
-candle-core         = { version = "0.7", features = ["serde"] }
-candle-nn           = { version = "0.7" }
-candle-transformers = { version = "0.7" }
+candle-core         = { version = "0.8" }
+candle-nn           = { version = "0.8" }
+candle-transformers = { version = "0.8" }
 
 # ── Hugging Face Hub: download model weights & tokenizer ──────────────────────
 hf-hub   = { version = "0.3", features = ["tokio"] }
@@ -42,7 +42,7 @@ serde_json = "1"
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 anyhow   = "1"          # ergonomic error handling
-rand     = "0.8"        # RNG for temperature sampling
+rand     = "0.9"        # RNG for temperature sampling
 regex    = "1"          # schedule parsing
 clap     = { version = "4", features = ["derive"] }  # CLI flags
 indicatif = "0.17"      # progress bars
