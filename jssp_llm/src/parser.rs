@@ -4,7 +4,7 @@
 // Extracts a Schedule (Vec<Vec<u32>>) from raw LLM text using regex.
 
 use regex::Regex;
-use crate::jssp::{Jobs, Schedule};
+use crate::jssp::Schedule;
 
 /// Parse the LLM's raw text output into a Schedule.
 ///
@@ -14,7 +14,7 @@ use crate::jssp::{Jobs, Schedule};
 ///   ...
 ///
 /// Returns `None` if the text is malformed or inconsistent with `jobs`.
-pub fn parse_output(text: &str, jobs: &Jobs) -> Option<Schedule> {
+pub fn parse_output(text: &str, jobs: &[Vec<(u32, u32)>]) -> Option<Schedule> {
     // Regex: "Job <N>:" followed by a sequence of non-negative integers.
     let re = Regex::new(r"(?i)job\s+(\d+)\s*:\s*([\d\s]+)").ok()?;
 

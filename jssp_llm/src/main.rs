@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 
     // Load model once; reuse across commands
     println!("Loading model from '{}' …", cli.adapter_dir);
-    let model_bundle = llm::ModelBundle::load(&cli.adapter_dir, &device).await?;
+    let mut model_bundle = llm::ModelBundle::load(&cli.adapter_dir, &device).await?;
     println!("✓ Model ready\n");
 
     match cli.command {
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
                 &test_jobs,
                 None,
                 5, 0.8, 0.95, 512,
-                &model_bundle,
+                &mut model_bundle,
                 &device,
             )?;
         }
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
                     &inst.jobs,
                     Some(inst.optimal),
                     samples, temperature, top_p, max_new_tokens,
-                    &model_bundle,
+                    &mut model_bundle,
                     &device,
                 )? {
                     all_gaps.push(gap);
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
                 &jobs,
                 None,
                 samples, temperature, top_p, max_new_tokens,
-                &model_bundle,
+                &mut model_bundle,
                 &device,
             )?;
         }
@@ -172,7 +172,7 @@ fn run_single(
     temperature: f64,
     top_p: f64,
     max_new_tokens: usize,
-    bundle: &llm::ModelBundle,
+    bundle: &mut llm::ModelBundle,
     device: &candle_core::Device,
 ) -> Result<Option<f64>> {
     use std::time::Instant;

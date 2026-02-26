@@ -13,12 +13,12 @@ use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_transformers::models::phi3::{Config as Phi3Config, Model as Phi3Model};
 use candle_nn::VarBuilder;
-use hf_hub::{api::tokio::Api, Repo, RepoType};
+
 use tokenizers::Tokenizer;
 use std::path::{Path, PathBuf};
 use rand::prelude::*;
 
-use crate::jssp::{Jobs, Schedule};
+use crate::jssp::Schedule;
 use crate::parser::parse_output;
 use crate::prompt::build_prompt_for_jobs;
 use crate::jssp::validate;
@@ -146,12 +146,12 @@ pub struct LlmResult {
 /// 3. Parses + validates each with `parse_output` + `validate`.
 /// 4. Returns the best (lowest makespan) valid result, and the count of valid samples.
 pub fn solve_with_llm(
-    jobs:           &Jobs,
+    jobs:           &[Vec<(u32, u32)>],
     n_samples:      usize,
     temperature:    f64,
     top_p:          f64,
     max_new_tokens: usize,
-    bundle:         &ModelBundle,
+    bundle:         &mut ModelBundle,
     device:         &Device,
 ) -> Result<(Option<LlmResult>, usize)> {
     let prompt = build_prompt_for_jobs(jobs);
@@ -165,13 +165,13 @@ pub fn solve_with_llm(
 
     let mut best: Option<LlmResult> = None;
     let mut valid_count = 0usize;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for sample_i in 0..n_samples {
         println!("  Sample {}/{} …", sample_i + 1, n_samples);
 
         let text = generate(
-            &bundle.model,
+            &mut bundle.model,
             &bundle.tokenizer,
             &input_ids,
             prompt_len,
@@ -215,10 +215,10 @@ pub fn solve_with_llm(
 // ── Token-by-token generation loop ───────────────────────────────────────────
 
 fn generate(
-    model:          &Phi3Model,
+    model:          &mut Phi3Model,
     tokenizer:      &Tokenizer,
     input_ids:      &[u32],
-    prompt_len:     usize,
+    _prompt_len:    usize,
     max_new_tokens: usize,
     temperature:    f64,
     top_p:          f64,
@@ -300,7 +300,7 @@ fn sample_token(
 
     // 4. Re-normalise nucleus and sample
     let total: f32 = nucleus.iter().map(|(_, p)| p).sum();
-    let u: f32 = rng.gen::<f32>() * total;
+    let u: f32 = rng.random::<f32>() * total;
     let mut acc = 0.0f32;
     for (idx, p) in &nucleus {
         acc += p;

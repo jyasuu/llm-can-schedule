@@ -45,7 +45,7 @@ pub fn parse_jobs_str(s: &str) -> Result<Jobs> {
 ///   Jobs: 3  Machines: 3
 ///   Job 0: (machine 0, duration 3) -> (machine 1, duration 5) -> (machine 2, duration 2)
 ///   ...
-pub fn format_job_centric(jobs: &Jobs) -> String {
+pub fn format_job_centric(jobs: &[Vec<(u32, u32)>]) -> String {
     let n_machines = count_machines(jobs);
     let mut out = format!("Jobs: {}  Machines: {}\n", jobs.len(), n_machines);
     for (j, job) in jobs.iter().enumerate() {
@@ -60,7 +60,7 @@ pub fn format_job_centric(jobs: &Jobs) -> String {
 
 /// Returns the problem description in machine-centric text format.
 /// Lists, for each machine, the sequence of jobs that visit it.
-pub fn format_machine_centric(jobs: &Jobs) -> String {
+pub fn format_machine_centric(jobs: &[Vec<(u32, u32)>]) -> String {
     let n_machines = count_machines(jobs);
     let mut machine_ops: Vec<Vec<(usize, u32)>> = vec![Vec::new(); n_machines as usize];
     for (j, job) in jobs.iter().enumerate() {
@@ -90,7 +90,7 @@ pub fn format_machine_centric(jobs: &Jobs) -> String {
 ///   2. No-overlap: on each machine, the time intervals of all operations must
 ///      be disjoint.
 ///   3. Non-negativity: all start times >= 0.
-pub fn validate(jobs: &Jobs, schedule: &Schedule) -> (bool, u32) {
+pub fn validate(jobs: &[Vec<(u32, u32)>], schedule: &Schedule) -> (bool, u32) {
     // --- Basic shape check ---
     if schedule.len() != jobs.len() {
         return (false, 0);
@@ -150,7 +150,7 @@ pub fn validate(jobs: &Jobs, schedule: &Schedule) -> (bool, u32) {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-pub fn count_machines(jobs: &Jobs) -> u32 {
+pub fn count_machines(jobs: &[Vec<(u32, u32)>]) -> u32 {
     jobs.iter()
         .flat_map(|j| j.iter())
         .map(|&(m, _)| m + 1)

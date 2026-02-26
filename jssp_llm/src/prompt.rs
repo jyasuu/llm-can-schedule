@@ -3,7 +3,7 @@
 // Mirrors Python's build_prompt() and the alpaca-style template used during
 // Phi-3 fine-tuning. The exact format must match what the model was trained on.
 
-use crate::jssp::{Jobs, format_job_centric};
+use crate::jssp::format_job_centric;
 
 /// System message used during fine-tuning.
 const SYSTEM: &str = "\
@@ -39,7 +39,7 @@ pub fn build_prompt(problem_text: &str) -> String {
 }
 
 /// Convenience wrapper: format jobs and build the prompt in one call.
-pub fn build_prompt_for_jobs(jobs: &Jobs) -> String {
+pub fn build_prompt_for_jobs(jobs: &[Vec<(u32, u32)>]) -> String {
     let problem = format_job_centric(jobs);
     build_prompt(&problem)
 }

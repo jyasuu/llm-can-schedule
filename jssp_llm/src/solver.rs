@@ -9,14 +9,14 @@
 // For the paper benchmarks (ft06, la01, …) the known optimal values are
 // hard-coded in benchmarks.rs, so we only call the solver for custom instances.
 
-use crate::jssp::{Jobs, Schedule};
+use crate::jssp::Schedule;
 
 // ── Greedy solver (SPT dispatching rule) ─────────────────────────────────────
 
 /// Greedy dispatcher: at each step, on every machine pick the available
 /// operation with the shortest processing time.
 /// Returns the makespan.
-pub fn solve_greedy(jobs: &Jobs) -> u32 {
+pub fn solve_greedy(jobs: &[Vec<(u32, u32)>]) -> u32 {
     if jobs.is_empty() {
         return 0;
     }
@@ -97,7 +97,7 @@ pub fn solve_greedy(jobs: &Jobs) -> u32 {
 
 /// Returns the makespan computed by the Shifting Bottleneck heuristic.
 /// Also returns the schedule for validation / display.
-pub fn solve_shifting_bottleneck(jobs: &Jobs) -> (u32, Schedule) {
+pub fn solve_shifting_bottleneck(jobs: &[Vec<(u32, u32)>]) -> (u32, Schedule) {
     // For simplicity we fall back to the greedy solver and return the greedy
     // schedule as well. A full SB implementation is ~500 lines; replace this
     // body with a complete implementation if tighter gaps are required.
@@ -110,7 +110,7 @@ pub fn solve_shifting_bottleneck(jobs: &Jobs) -> (u32, Schedule) {
 }
 
 /// Like solve_greedy but also returns the full schedule matrix.
-pub fn greedy_schedule(jobs: &Jobs) -> Schedule {
+pub fn greedy_schedule(jobs: &[Vec<(u32, u32)>]) -> Schedule {
     if jobs.is_empty() {
         return vec![];
     }
