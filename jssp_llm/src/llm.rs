@@ -69,17 +69,38 @@ impl ModelBundle {
         println!("  Base model : {}", cfg.base_model_name_or_path);
         println!("  LoRA rank={} alpha={} scale={:.4}", cfg.r, cfg.lora_alpha, lora_scale);
 
+        // Phi-3-mini-128k and Phi-3-mini-4k share identical weights and architecture.
+        // The only difference is rope_scaling in config.json. candle's Phi3Config was
+        // designed for the 4k variant and cannot parse the 128k "longrope" nested object.
+        // For JSSP prompts (<512 tokens) the extra context window is irrelevant.
+        // So if the adapter was trained on the 128k base, we transparently redirect to
+        // the 4k base whose config.json candle handles natively.
+        let effective_repo = if cfg.base_model_name_or_path.contains("128k") {
+            let r = cfg.base_model_name_or_path.replace("128k", "4k");
+            println!("  Redirect   : using 4k config ('{}') — same weights, candle-compatible", r);
+            r
+        } else {
+            cfg.base_model_name_or_path.clone()
+        };
+
         // 2. Locate base model files (cache first, then Hub download)
         let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
-        let base_files = find_or_download_base(&cfg.base_model_name_or_path).await?;
+        // Try the original repo (128k) first since it's already cached from the Python run.
+        // If that fails, try the 4k variant.
+        let base_files = match find_or_download_base(&cfg.base_model_name_or_path).await {
+            Ok(files) => files,
+            Err(_)    => find_or_download_base(&effective_repo).await
+                .with_context(|| format!("Cannot find weights for '{}' or '{}'",
+                    cfg.base_model_name_or_path, effective_repo))?,
+        };
 
         // 3. Load base tensors
         println!("  Loading {} base shard(s)…", base_files.len());
         let mut tensors = load_safetensors_map(&base_files, dtype, device)?;
         println!("  Base tensors loaded: {}", tensors.len());
 
-        // 4. Load config.json (look next to first shard, or download)
-        let config = load_model_config(&base_files, &cfg.base_model_name_or_path).await?;
+        // 4. Load config.json — use the 4k repo so candle can parse it
+        let config = load_model_config(&base_files, &effective_repo).await?;
 
         // 5. Apply LoRA deltas
         let adapter_st = adapter_path.join("adapter_model.safetensors");
@@ -117,7 +138,7 @@ impl ModelBundle {
             .context("Failed to build Phi-3 model")?;
 
         // 7. Tokenizer
-        let tokenizer    = load_tokenizer(&adapter_path, &cfg.base_model_name_or_path).await?;
+        let tokenizer    = load_tokenizer(&adapter_path, &effective_repo).await?;
         let eos_token_id = find_eos(&tokenizer);
         println!("  EOS token id : {}", eos_token_id);
 
@@ -342,15 +363,14 @@ async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Load config.json: look beside the weight files, then Hub.
-/// Normalizes Phi-3-128k's `rope_scaling` field (a nested object with float
-/// arrays) into the simple string form that candle's Phi3Config expects.
+/// Load config.json from beside the weight files, or download from Hub.
+/// We always receive the 4k model's repo_id here, so candle's Phi3Config
+/// parses it correctly without any rope_scaling workarounds.
 async fn load_model_config(base_files: &[PathBuf], repo_id: &str) -> Result<Phi3Config> {
-    // Find the raw JSON text
     let json_text = if let Some(dir) = base_files.first().and_then(|p| p.parent()) {
         let cfg_path = dir.join("config.json");
         if cfg_path.exists() {
-            println!("  Config     : {} (local)", cfg_path.display());
+            println!("  Config     : local ({})", cfg_path.display());
             std::fs::read_to_string(&cfg_path)?
         } else {
             download_config_json(repo_id).await?
@@ -359,54 +379,9 @@ async fn load_model_config(base_files: &[PathBuf], repo_id: &str) -> Result<Phi3
         download_config_json(repo_id).await?
     };
 
-    // Parse into a generic Value so we can inspect/fix rope_scaling
-    let mut val: serde_json::Value = serde_json::from_str(&json_text)
-        .context("config.json is not valid JSON")?;
-
-    // Phi-3-mini-128k uses rope_scaling = { "type": "longrope", "long_factor": [...], ... }
-    // candle's Phi3Config expects rope_scaling to be a plain String (or absent).
-    // Strategy: if rope_scaling is an object, extract "type" and replace the whole
-    // field with just that string, which is what candle uses for its match arm.
-    if let Some(obj) = val.get("rope_scaling").and_then(|v| v.as_object()) {
-        let rope_type = obj.get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("longrope")
-            .to_string();
-        println!("  rope_scaling type: {} (normalizing for candle)", rope_type);
-        val["rope_scaling"] = serde_json::Value::String(rope_type);
-    }
-
-    // First try with normalized rope_scaling
-    match serde_json::from_value::<Phi3Config>(val.clone()) {
-        Ok(cfg) => return Ok(cfg),
-        Err(e)  => println!("  Config parse note (attempt 1): {e}"),
-    }
-
-    // Second try: remove rope_scaling entirely (candle treats None as default)
-    val.as_object_mut().map(|m| m.remove("rope_scaling"));
-    match serde_json::from_value::<Phi3Config>(val.clone()) {
-        Ok(cfg) => { println!("  Config parsed without rope_scaling"); return Ok(cfg); }
-        Err(e)  => println!("  Config parse note (attempt 2): {e}"),
-    }
-
-    // Third try: keep only the core fields that all Phi3Config versions have.
-    // This handles any future unknown fields added to config.json.
-    let core_keys = [
-        "vocab_size", "hidden_size", "intermediate_size", "num_hidden_layers",
-        "num_attention_heads", "num_key_value_heads", "hidden_act",
-        "max_position_embeddings", "rms_norm_eps", "rope_theta",
-        "bos_token_id", "eos_token_id", "original_max_position_embeddings",
-    ];
-    let pruned: serde_json::Map<String, serde_json::Value> = val
-        .as_object()
-        .map(|m| m.iter()
-            .filter(|(k, _)| core_keys.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect())
-        .unwrap_or_default();
-
-    serde_json::from_value(serde_json::Value::Object(pruned)).context(
-        "Cannot parse config.json into Phi3Config even with only core fields.\n\
+    serde_json::from_str(&json_text).context(
+        "Cannot parse config.json into Phi3Config.\n\
+         If you see a rope_scaling error, the 4k→128k redirect failed.\n\
          Try: cargo update -p candle-transformers"
     )
 }
