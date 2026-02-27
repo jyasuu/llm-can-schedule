@@ -36,6 +36,12 @@ struct Cli {
     #[arg(long, default_value_t = -1)]
     device: i64,
 
+    /// Model dtype: f32, f16, bf16
+    /// Default: f16 on CUDA (safe for T4/V100), f32 on CPU.
+    /// Use bf16 only on Ampere (A100) or newer.
+    #[arg(long)]
+    dtype: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -90,9 +96,12 @@ async fn main() -> Result<()> {
     // Resolve device
     let device = llm::make_device(cli.device)?;
 
+    // Resolve dtype (F16 on CUDA by default — safe for T4; use --dtype bf16 for A100)
+    let dtype = llm::parse_dtype(cli.dtype.as_deref(), &device)?;
+
     // Load model once; reuse across commands
     println!("Loading model from '{}' …", cli.adapter_dir);
-    let mut model_bundle = llm::ModelBundle::load(&cli.adapter_dir, &device).await?;
+    let mut model_bundle = llm::ModelBundle::load(&cli.adapter_dir, &device, dtype).await?;
     println!("✓ Model ready\n");
 
     match cli.command {
@@ -165,7 +174,7 @@ async fn main() -> Result<()> {
 // ── Shared run helper ─────────────────────────────────────────────────────────
 
 fn run_single(
-    label: &str,
+    _label: &str,
     jobs: &[Vec<(u32, u32)>],
     optimal: Option<u32>,
     n_samples: usize,
@@ -198,9 +207,10 @@ fn run_single(
         println!("  LLM best         : {}  (gap {:.1}%)", res.makespan, gap);
         println!("  Valid candidates : {} / {}", valid_count, n_samples);
         println!("  Time             : {:.1}s", elapsed);
-        println!("\n  Schedule preview:");
-        for line in res.text.lines().take(8) {
-            println!("    {}", line);
+        println!("\n  Schedule (start times per operation):");
+        for (j, times) in res.start_times.iter().enumerate() {
+            let times_str: Vec<String> = times.iter().map(|t| t.to_string()).collect();
+            println!("    Job {:2}: {}", j, times_str.join("  "));
         }
         return Ok(Some(gap));
     } else {

@@ -36,7 +36,20 @@ pub fn make_device(idx: i64) -> Result<Device> {
     }
 }
 
-// ── adapter_config.json ───────────────────────────────────────────────────────
+// ── dtype helper ─────────────────────────────────────────────────────────────
+
+/// Resolve the model dtype from an optional CLI flag.
+/// Default: F16 on CUDA (safe for T4 sm_75), F32 on CPU.
+/// BF16 requires Ampere (A100, sm_80+) — don't use on T4.
+pub fn parse_dtype(flag: Option<&str>, device: &Device) -> Result<DType> {
+    match flag {
+        Some("bf16") => Ok(DType::BF16),
+        Some("f16")  => Ok(DType::F16),
+        Some("f32")  => Ok(DType::F32),
+        Some(other)  => bail!("Unknown dtype '{}'. Use f32, f16, or bf16.", other),
+        None => Ok(if device.is_cuda() { DType::F16 } else { DType::F32 }),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct AdapterConfig {
@@ -135,7 +148,7 @@ pub struct ModelBundle {
 }
 
 impl ModelBundle {
-    pub async fn load(adapter_dir: &str, device: &Device) -> Result<Self> {
+    pub async fn load(adapter_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
         let adapter_path = resolve_adapter_dir(Path::new(adapter_dir))?;
 
         // 1. Read LoRA config
@@ -147,9 +160,9 @@ impl ModelBundle {
         let lora_scale = cfg.lora_alpha / cfg.r as f64;
         println!("  Base model : {}", cfg.base_model_name_or_path);
         println!("  LoRA rank={} alpha={} scale={:.4}", cfg.r, cfg.lora_alpha, lora_scale);
+        println!("  dtype      : {:?}", dtype);
 
         // 2. Locate base model files (local HF cache first, then Hub download)
-        let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
         let base_files = find_or_download_base(&cfg.base_model_name_or_path).await?;
 
         // 3. Load base tensors
