@@ -1,72 +1,47 @@
 // src/prompt.rs
 //
-// Mirrors Python's build_prompt(), format_job_centric(), and format_solution()
-// EXACTLY as used during fine-tuning. The format MUST match training or the
-// model will produce garbage output.
-//
-// Python training prompt template (build_prompt with no solution):
-//   <|user|>
-//   {problem}<|end|>
-//   <|assistant|>
-//
-// Python format_job_centric() output (Listing 2 from the paper):
-//   Optimize schedule for N Jobs across M Machines to minimize makespan. ...
-//
-//   Problem:
-//
-//    Job 0 consists of the following Operations:
-//     Operation 0 on Machine 2 duration 1 mins.
-//     Operation 1 on Machine 0 duration 3 mins.
-//   ...
-//
-// NOTE: The old Rust prompt used a different system/user template and a
-// simplified format that the model was NEVER trained on.
+// Mirrors Python's build_prompt() and the alpaca-style template used during
+// Phi-3 fine-tuning. The exact format must match what the model was trained on.
 
-use crate::jssp::{count_machines, Jobs};
+use crate::jssp::format_job_centric;
 
-// The paper uses 3 instruction variants (chosen randomly during training).
-// At inference time we always use variant 0 (same as Python with rng=None).
-const INSTRUCTION: &str =
-    "Optimize schedule for {nj} Jobs across {nm} Machines to minimize makespan. \
-Each job involves a series of Operations needing specific machines and times. \
-Operations are processed in order, without interruption, on a single Machine at a time.";
+/// System message used during fine-tuning.
+const SYSTEM: &str = "\
+You are an expert scheduler. Given a Job Shop Scheduling Problem (JSSP), \
+output a valid schedule that minimises the makespan (total completion time). \
+For each job list the start time of each operation in order. \
+Output ONLY the schedule, no explanation.";
 
-/// Mirrors Python's format_job_centric(jobs, rng=None) — Paper Listing 2.
-pub fn format_job_centric(jobs: &Jobs) -> String {
-    let nj = jobs.len();
-    let nm = count_machines(jobs) as usize;
+/// Expected output format hint appended to the user message.
+const FORMAT_HINT: &str = "\
+Output format (one line per job, space-separated start times):
+Job 0: <t0> <t1> ... <tk>
+Job 1: <t0> <t1> ... <tk>
+...";
 
-    let instr = INSTRUCTION
-        .replace("{nj}", &nj.to_string())
-        .replace("{nm}", &nm.to_string());
-
-    let mut lines = vec![instr, String::new(), "Problem:".to_string()];
-
-    for (j, job) in jobs.iter().enumerate() {
-        lines.push(String::new());
-        lines.push(format!(" Job {} consists of the following Operations:", j));
-        for (k, &(m, d)) in job.iter().enumerate() {
-            lines.push(format!(
-                "  Operation {} on Machine {} duration {} mins.",
-                k, m, d
-            ));
-        }
-    }
-
-    lines.join("\n")
-}
-
-/// Mirrors Python's build_prompt(problem, solution=None) — inference template.
-/// Uses Phi-3 chat template without <|system|> (matches training exactly).
+/// Build the full prompt string for a problem encoded as `problem_text`.
+///
+/// Uses the Phi-3 instruct chat template:
+///   <|system|>\n{system}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n
+///
+/// Adjust the template delimiters if you switch to a different base model.
 pub fn build_prompt(problem_text: &str) -> String {
+    let user = format!(
+        "Solve the following Job Shop Scheduling Problem:\n\n{}\n\n{}",
+        problem_text.trim(),
+        FORMAT_HINT,
+    );
+
     format!(
-        "<|user|>\n{}<|end|>\n<|assistant|>\n",
-        problem_text.trim()
+        "<|system|>\n{}<|end|>\n<|user|>\n{}<|end|>\n<|assistant|>\n",
+        SYSTEM, user
     )
 }
 
-/// Convenience wrapper: format jobs and build the inference prompt in one call.
-pub fn build_prompt_for_jobs(jobs: &Jobs) -> String {
+/// Convenience wrapper: format jobs and build the prompt in one call.
+// FIX: use &[Vec<(u32, u32)>] (slice) instead of &Jobs (= &Vec<...>)
+// so callers passing a &[...] slice (e.g. from llm.rs) don't get E0308.
+pub fn build_prompt_for_jobs(jobs: &[Vec<(u32, u32)>]) -> String {
     let problem = format_job_centric(jobs);
     build_prompt(&problem)
 }
