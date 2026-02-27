@@ -461,23 +461,32 @@ async fn download_config_json(repo_id: &str) -> Result<String> {
     std::fs::read_to_string(p).context("Cannot read downloaded config.json")
 }
 
-/// Load tokenizer.json: local adapter dir → HF cache → Hub download.
+/// Load tokenizer.json.
+/// Priority: HF cache (original from Microsoft) → adapter dir (may be re-saved by unsloth) → Hub download.
+/// The adapter zip's tokenizer.json is sometimes re-saved by unsloth/PEFT in a format
+/// that older tokenizer crate versions reject. The HF cache copy is always the original.
 async fn load_tokenizer(adapter_path: &Path, repo_id: &str) -> Result<Tokenizer> {
-    // 1. Local adapter dir (our zip contains tokenizer.json)
-    let local = adapter_path.join("tokenizer.json");
-    if local.exists() {
-        println!("  Tokenizer  : local adapter dir");
-        return load_tok_file(&local);
-    }
-    // 2. HF cache snapshot
+    // 1. HF cache — original tokenizer from Microsoft, most reliable
     if let Some(snap) = find_cached_snapshot(repo_id) {
         let cached = snap.join("tokenizer.json");
         if cached.exists() {
-            println!("  Tokenizer  : HF cache ({})", cached.display());
-            return load_tok_file(&cached);
+            println!("  Tokenizer  : HF cache");
+            match load_tok_file(&cached) {
+                Ok(t) => return Ok(t),
+                Err(e) => println!("  Tokenizer cache load failed ({e}), trying adapter dir…"),
+            }
         }
     }
-    // 3. Download
+    // 2. Adapter dir
+    let local = adapter_path.join("tokenizer.json");
+    if local.exists() {
+        println!("  Tokenizer  : adapter dir");
+        match load_tok_file(&local) {
+            Ok(t) => return Ok(t),
+            Err(e) => println!("  Adapter tokenizer load failed ({e}), downloading…"),
+        }
+    }
+    // 3. Download fresh from Hub
     println!("  Tokenizer  : downloading from Hub…");
     use hf_hub::api::tokio::ApiBuilder;
     let api  = ApiBuilder::new().with_progress(false).build()?;

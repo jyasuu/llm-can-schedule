@@ -32,7 +32,7 @@ hf-hub = { version = "0.3", features = ["tokio"] }
 # 0.15 is the version used in candle's own Phi-3 examples and correctly parses
 # Phi-3's tokenizer.json (Unigram / sentencepiece-based).
 # 0.19 introduced a breaking ModelWrapper schema change that rejects Phi-3's file.
-tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # ── Async runtime ─────────────────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }
