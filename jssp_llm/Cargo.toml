@@ -5,9 +5,6 @@ edition     = "2021"
 description = "JSSP solver using a LoRA-fine-tuned LLM via candle (pure Rust, no Python FFI)"
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
-# Default: CPU-only inference (portable).
-# Enable `cuda` for NVIDIA GPU acceleration.
-# Enable `metal` for Apple Silicon acceleration.
 [features]
 default = []
 cuda    = [
@@ -22,16 +19,20 @@ metal   = [
 ]
 
 [dependencies]
-# ── Candle ML framework (Hugging Face) ────────────────────────────────────────
+# ── Candle ML framework ────────────────────────────────────────────────────────
+# Pin to 0.8.x — the version cargo already resolved; keeps lockfile stable.
 candle-core         = { version = "0.8" }
 candle-nn           = { version = "0.8" }
 candle-transformers = { version = "0.8" }
 
-# ── Hugging Face Hub: download model weights & tokenizer ──────────────────────
-hf-hub   = { version = "0.3", features = ["tokio"] }
+# ── Hugging Face Hub ──────────────────────────────────────────────────────────
+hf-hub = { version = "0.3", features = ["tokio"] }
 
-# ── Tokenizers (HF fast tokenizer, used by Phi-3 / most modern LLMs) ─────────
-tokenizers = { version = "0.19", features = ["http"] }
+# ── Tokenizer ─────────────────────────────────────────────────────────────────
+# 0.15 is the version used in candle's own Phi-3 examples and correctly parses
+# Phi-3's tokenizer.json (Unigram / sentencepiece-based).
+# 0.19 introduced a breaking ModelWrapper schema change that rejects Phi-3's file.
+tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
 
 # ── Async runtime ─────────────────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }
