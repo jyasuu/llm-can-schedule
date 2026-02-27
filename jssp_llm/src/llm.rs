@@ -343,25 +343,82 @@ async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
 }
 
 /// Load config.json: look beside the weight files, then Hub.
+/// Normalizes Phi-3-128k's `rope_scaling` field (a nested object with float
+/// arrays) into the simple string form that candle's Phi3Config expects.
 async fn load_model_config(base_files: &[PathBuf], repo_id: &str) -> Result<Phi3Config> {
-    // The config.json should be in the same directory as the weight files
-    if let Some(dir) = base_files.first().and_then(|p| p.parent()) {
+    // Find the raw JSON text
+    let json_text = if let Some(dir) = base_files.first().and_then(|p| p.parent()) {
         let cfg_path = dir.join("config.json");
         if cfg_path.exists() {
             println!("  Config     : {} (local)", cfg_path.display());
-            return serde_json::from_str(&std::fs::read_to_string(&cfg_path)?)
-                .context("Cannot parse config.json");
+            std::fs::read_to_string(&cfg_path)?
+        } else {
+            download_config_json(repo_id).await?
         }
+    } else {
+        download_config_json(repo_id).await?
+    };
+
+    // Parse into a generic Value so we can inspect/fix rope_scaling
+    let mut val: serde_json::Value = serde_json::from_str(&json_text)
+        .context("config.json is not valid JSON")?;
+
+    // Phi-3-mini-128k uses rope_scaling = { "type": "longrope", "long_factor": [...], ... }
+    // candle's Phi3Config expects rope_scaling to be a plain String (or absent).
+    // Strategy: if rope_scaling is an object, extract "type" and replace the whole
+    // field with just that string, which is what candle uses for its match arm.
+    if let Some(obj) = val.get("rope_scaling").and_then(|v| v.as_object()) {
+        let rope_type = obj.get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("longrope")
+            .to_string();
+        println!("  rope_scaling type: {} (normalizing for candle)", rope_type);
+        val["rope_scaling"] = serde_json::Value::String(rope_type);
     }
-    // Fall back to downloading
-    println!("  Config     : downloading config.json…");
+
+    // First try with normalized rope_scaling
+    match serde_json::from_value::<Phi3Config>(val.clone()) {
+        Ok(cfg) => return Ok(cfg),
+        Err(e)  => println!("  Config parse note (attempt 1): {e}"),
+    }
+
+    // Second try: remove rope_scaling entirely (candle treats None as default)
+    val.as_object_mut().map(|m| m.remove("rope_scaling"));
+    match serde_json::from_value::<Phi3Config>(val.clone()) {
+        Ok(cfg) => { println!("  Config parsed without rope_scaling"); return Ok(cfg); }
+        Err(e)  => println!("  Config parse note (attempt 2): {e}"),
+    }
+
+    // Third try: keep only the core fields that all Phi3Config versions have.
+    // This handles any future unknown fields added to config.json.
+    let core_keys = [
+        "vocab_size", "hidden_size", "intermediate_size", "num_hidden_layers",
+        "num_attention_heads", "num_key_value_heads", "hidden_act",
+        "max_position_embeddings", "rms_norm_eps", "rope_theta",
+        "bos_token_id", "eos_token_id", "original_max_position_embeddings",
+    ];
+    let pruned: serde_json::Map<String, serde_json::Value> = val
+        .as_object()
+        .map(|m| m.iter()
+            .filter(|(k, _)| core_keys.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+        .unwrap_or_default();
+
+    serde_json::from_value(serde_json::Value::Object(pruned)).context(
+        "Cannot parse config.json into Phi3Config even with only core fields.\n\
+         Try: cargo update -p candle-transformers"
+    )
+}
+
+async fn download_config_json(repo_id: &str) -> Result<String> {
+    println!("  Config     : downloading config.json from Hub…");
     use hf_hub::api::tokio::ApiBuilder;
     let api  = ApiBuilder::new().with_progress(false).build()?;
     let repo = api.model(repo_id.to_string());
     let p    = repo.get("config.json").await
         .with_context(|| format!("Cannot fetch config.json from '{}'", repo_id))?;
-    serde_json::from_str(&std::fs::read_to_string(p)?)
-        .context("Cannot parse config.json")
+    std::fs::read_to_string(p).context("Cannot read downloaded config.json")
 }
 
 /// Load tokenizer.json: local adapter dir → HF cache → Hub download.
