@@ -74,16 +74,6 @@ fn default_rms_norm_eps() -> f64 { 1e-5 }
 fn default_original_max_pos() -> usize { 4096 }
 
 impl RawPhi3Config {
-    // OOM FIX 1: max_seq_len parameter caps max_position_embeddings.
-    //
-    // Phi-3-mini-128k has max_position_embeddings=131072. Candle pre-allocates
-    // the full RoPE cos/sin cache AND the KV cache at this size on the first
-    // forward pass:
-    //   32 layers × 2 (K+V) × 32 heads × 96 dim × 131072 × 2 bytes = ~12.9 GB
-    // This OOMs even after the model weights fit in VRAM.
-    //
-    // Python avoids this via max_seq_length=2048 in FastLanguageModel.from_pretrained().
-    // We mirror that here. Our prompts are ~800-1200 tokens + 256 new = well under 2048.
     fn into_phi3_config(self, max_seq_len: usize) -> Result<Phi3Config> {
         let rope_scaling: Option<String> = match &self.rope_scaling {
             serde_json::Value::String(s) => Some(s.clone()),
@@ -97,11 +87,15 @@ impl RawPhi3Config {
             }
         };
 
+        // ── OOM FIX 1 ──────────────────────────────────────────────────────
+        // Phi-3-mini-128k has max_position_embeddings=131072. Candle pre-allocates
+        // RoPE cos/sin cache AND full KV cache at this size on the first forward():
+        //   32 layers × 2 × 32 heads × 96 dim × 131072 tokens × 2 bytes ≈ 12.9 GB
+        // Python avoids this via max_seq_length=2048 in FastLanguageModel.
+        // We mirror that here. Prompts are ~800-1200 tokens + 256 new = well under 2048.
         let capped = self.max_position_embeddings.min(max_seq_len);
-        if capped < self.max_position_embeddings {
-            println!("  max_position_embeddings capped: {} → {} (OOM prevention)",
-                self.max_position_embeddings, capped);
-        }
+        println!("  max_position_embeddings capped: {} → {} (OOM prevention)",
+            self.max_position_embeddings, capped);
 
         let mut map = serde_json::json!({
             "vocab_size":                       self.vocab_size,
@@ -111,7 +105,7 @@ impl RawPhi3Config {
             "num_attention_heads":              self.num_attention_heads,
             "num_key_value_heads":              self.num_key_value_heads,
             "hidden_act":                       self.hidden_act,
-            "max_position_embeddings":          capped,   // ← capped here
+            "max_position_embeddings":          capped,
             "rms_norm_eps":                     self.rms_norm_eps,
             "rope_theta":                       self.rope_theta,
             "original_max_position_embeddings": self.original_max_position_embeddings,
@@ -142,8 +136,8 @@ pub struct ModelBundle {
 
 impl ModelBundle {
     pub async fn load(adapter_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
-        // Mirrors Python's max_seq_length=2048. Caps max_position_embeddings
-        // so the KV+RoPE cache is ~200 MB instead of ~12.9 GB on Phi-3-128k.
+        // Mirrors Python's max_seq_length=2048 in FastLanguageModel.from_pretrained().
+        // This caps max_position_embeddings so KV+RoPE cache is ~200 MB not ~12.9 GB.
         let max_seq_len: usize = 2048;
 
         let adapter_path = resolve_adapter_dir(Path::new(adapter_dir))?;
@@ -164,46 +158,54 @@ impl ModelBundle {
         let mut tensors = load_safetensors_map(&base_files, dtype, device)?;
         println!("  Base tensors loaded: {}", tensors.len());
 
-        // Pass max_seq_len so config caps max_position_embeddings
         let config = load_model_config(&base_files, &cfg.base_model_name_or_path, max_seq_len).await?;
 
         let adapter_st = adapter_path.join("adapter_model.safetensors");
         if !adapter_st.exists() {
             bail!("adapter_model.safetensors missing in '{}'", adapter_path.display());
         }
-        let lora_map = load_safetensors_map(&[&adapter_st], dtype, device)?;
-        println!("  LoRA tensors: {}", lora_map.len());
 
-        let mut merged = 0usize;
-        let a_keys: Vec<String> = lora_map.keys()
-            .filter(|k| k.ends_with(".lora_A.weight"))
-            .cloned().collect();
+        // ── OOM FIX 2 ──────────────────────────────────────────────────────
+        // Load LoRA into a separate map, merge into `tensors`, then DROP immediately.
+        // Without drop(), lora_map (~500 MB) stays alive through Phi3Model::new().
+        {
+            let lora_map = load_safetensors_map(&[&adapter_st], dtype, device)?;
+            println!("  LoRA tensors: {}", lora_map.len());
 
-        for a_key in &a_keys {
-            let b_key    = a_key.replace(".lora_A.weight", ".lora_B.weight");
-            let Some(la) = lora_map.get(a_key.as_str()) else { continue };
-            let Some(lb) = lora_map.get(&b_key)          else { continue };
-            let base_key = a_key
-                .trim_start_matches("base_model.model.")
-                .replace(".lora_A.weight", ".weight");
-            let Some(w) = tensors.get(&base_key) else { continue };
-            let delta = lb.matmul(la)?.affine(lora_scale, 0.0)?;
-            tensors.insert(base_key, (w + delta)?);
-            merged += 1;
+            let mut merged = 0usize;
+            let a_keys: Vec<String> = lora_map.keys()
+                .filter(|k| k.ends_with(".lora_A.weight"))
+                .cloned().collect();
+
+            for a_key in &a_keys {
+                let b_key    = a_key.replace(".lora_A.weight", ".lora_B.weight");
+                let Some(la) = lora_map.get(a_key.as_str()) else { continue };
+                let Some(lb) = lora_map.get(&b_key)          else { continue };
+                let base_key = a_key
+                    .trim_start_matches("base_model.model.")
+                    .replace(".lora_A.weight", ".weight");
+                let Some(w) = tensors.get(&base_key) else { continue };
+                let delta = lb.matmul(la)?.affine(lora_scale, 0.0)?;
+                tensors.insert(base_key, (w + delta)?);
+                merged += 1;
+            }
+            println!("  Merged {} LoRA modules", merged);
+            // lora_map dropped here → ~500 MB freed before model build
         }
-        println!("  Merged {} LoRA modules", merged);
 
-        // OOM FIX 2: free lora_map immediately — ~500 MB freed before model build
-        drop(lora_map);
-
-        // OOM FIX 3: scope VarMap so it's freed right after Phi3Model::new()
-        // takes ownership of the weights. Without this, VarMap (a full copy of
-        // all tensors) lives alongside the built model until end of load().
+        // ── OOM FIX 3 ──────────────────────────────────────────────────────
+        // Use VarBuilder::from_tensors() instead of VarMap.
+        //
+        // The old path was:
+        //   tensors_to_varmap(tensors)  ← calls Var::from_tensor() on every weight
+        //                                 = full second copy of 7.5 GB in VRAM
+        //   VarBuilder::from_varmap(&vmap, ...)
+        //
+        // VarBuilder::from_tensors() wraps the existing Tensors in-place with no copy.
+        // This saves ~7.5 GB peak during model construction.
         let model = {
-            let vmap = tensors_to_varmap(tensors)?;
-            let vb   = VarBuilder::from_varmap(&vmap, dtype, device);
+            let vb = VarBuilder::from_tensors(tensors, dtype, device);
             Phi3Model::new(&config, vb).context("Failed to build Phi-3 model")?
-            // vmap dropped here, freeing the duplicate tensor copies
         };
 
         let tokenizer    = load_tokenizer(&adapter_path, &cfg.base_model_name_or_path).await?;
@@ -239,7 +241,7 @@ pub fn solve_with_llm(
 
     let mut best:  Option<LlmResult> = None;
     let mut valid: usize = 0;
-    // OOM FIX 4 (also warning fix): rand 0.9 renamed thread_rng() → rng()
+    // OOM FIX 4: rand 0.9 renamed thread_rng() → rng()
     let mut rng = rand::rng();
 
     for i in 0..n_samples {
@@ -317,7 +319,7 @@ fn sample_token(logits: &Tensor, temperature: f64, top_p: f64, rng: &mut impl Rn
         if cum as f64 >= top_p { break; }
     }
     let total: f32 = nucleus.iter().map(|(_, p)| p).sum();
-    // OOM FIX 4 (also warning fix): rand 0.9 renamed gen() → random()
+    // OOM FIX 4: rand 0.9 renamed gen() → random()
     let u: f32 = rng.random::<f32>() * total;
     let mut acc = 0f32;
     for &(i, p) in &nucleus { acc += p; if acc >= u { return Ok(i as u32); } }
@@ -470,7 +472,7 @@ fn load_tok_file(path: &Path) -> Result<Tokenizer> {
     ))
 }
 
-// ── Tensor / VarMap ───────────────────────────────────────────────────────────
+// ── Tensor helpers ────────────────────────────────────────────────────────────
 
 fn load_safetensors_map(
     files:  &[impl AsRef<Path>],
@@ -486,6 +488,10 @@ fn load_safetensors_map(
     Ok(map)
 }
 
+// Kept for potential future use but no longer called in the hot path.
+// Previously used to build a VarMap from tensors, which caused a full
+// second copy of all weights in VRAM. Now we use VarBuilder::from_tensors().
+#[allow(dead_code)]
 fn tensors_to_varmap(tensors: HashMap<String, Tensor>) -> Result<VarMap> {
     let vm = VarMap::new();
     {
