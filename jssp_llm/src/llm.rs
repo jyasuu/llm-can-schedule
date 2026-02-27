@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{VarBuilder, VarMap};
 use candle_transformers::models::phi3::{Config as Phi3Config, Model as Phi3Model};
 use hf_hub::api::tokio::Api;
@@ -179,7 +179,7 @@ pub fn solve_with_llm(
 
     let mut best:        Option<LlmResult> = None;
     let mut valid_count: usize = 0;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for i in 0..n_samples {
         println!("  Sample {}/{} …", i + 1, n_samples);
@@ -261,7 +261,7 @@ fn sample_token(
     }
 
     let total: f32 = nucleus.iter().map(|(_, p)| p).sum();
-    let u: f32     = rng.gen::<f32>() * total;
+    let u: f32     = rng.random::<f32>() * total;
     let mut acc    = 0f32;
     for &(i, p) in &nucleus {
         acc += p;
@@ -328,8 +328,7 @@ fn load_safetensors_map(
 ) -> Result<HashMap<String, Tensor>> {
     let mut map = HashMap::new();
     for f in files {
-        // SAFETY: file is on disk and not mutated during loading.
-        let loaded = unsafe { candle_core::safetensors::load(f.as_ref(), device)? };
+        let loaded = candle_core::safetensors::load(f.as_ref(), device)?;
         for (name, t) in loaded {
             map.insert(name, t.to_dtype(dtype)?);
         }
@@ -342,7 +341,7 @@ fn tensors_to_varmap(tensors: HashMap<String, Tensor>) -> Result<VarMap> {
     {
         let mut data = vm.data().lock().unwrap();
         for (name, tensor) in tensors {
-            data.insert(name, candle_nn::Var::from_tensor(&tensor)?);
+            data.insert(name, Var::from_tensor(&tensor)?);
         }
     }
     Ok(vm)
