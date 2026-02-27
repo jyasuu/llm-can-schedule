@@ -1,12 +1,4 @@
 // src/llm.rs
-//
-// Loading strategy (in priority order):
-//   1. Look in the local HF Hub cache (~/.cache/huggingface/hub/) — works when
-//      the Python notebook already downloaded the base model.
-//   2. Fall back to downloading via the HF Hub API.
-//
-// This avoids the "relative URL without a base" error that occurs when
-// Api::new() can't resolve the endpoint in some Colab configurations.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,9 +30,6 @@ pub fn make_device(idx: i64) -> Result<Device> {
 
 // ── dtype helper ─────────────────────────────────────────────────────────────
 
-/// Resolve the model dtype from an optional CLI flag.
-/// Default: F16 on CUDA (safe for T4 sm_75), F32 on CPU.
-/// BF16 requires Ampere (A100, sm_80+) — don't use on T4.
 pub fn parse_dtype(flag: Option<&str>, device: &Device) -> Result<DType> {
     match flag {
         Some("bf16") => Ok(DType::BF16),
@@ -59,11 +48,6 @@ struct AdapterConfig {
 }
 
 // ── Custom config deserializer that handles both 4k and 128k ─────────────────
-//
-// Candle's Phi3Config has `rope_scaling: Option<String>` which only works for
-// the 4k model. The 128k model has `rope_scaling: { type, short_factor, long_factor }`.
-// We deserialize into our own struct (which accepts rope_scaling as raw JSON),
-// then construct candle's Config directly from the fields we need.
 
 #[derive(Debug, Deserialize)]
 struct RawPhi3Config {
@@ -78,7 +62,6 @@ struct RawPhi3Config {
     #[serde(default = "default_rms_norm_eps")]
     rms_norm_eps: f64,
     rope_theta: f64,
-    // Accept any shape — object or string or null — we only need the type string
     #[serde(default)]
     rope_scaling: serde_json::Value,
     #[serde(default = "default_original_max_pos")]
@@ -93,8 +76,7 @@ fn default_rms_norm_eps() -> f64 { 1e-5 }
 fn default_original_max_pos() -> usize { 4096 }
 
 impl RawPhi3Config {
-    fn into_phi3_config(self) -> Result<Phi3Config> {
-        // Extract rope_scaling type string from whatever shape it has
+    fn into_phi3_config(self, max_seq_len: usize) -> Result<Phi3Config> {
         let rope_scaling: Option<String> = match &self.rope_scaling {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Object(m) => m.get("type")
@@ -107,7 +89,18 @@ impl RawPhi3Config {
             }
         };
 
-        // Re-serialize to JSON with normalized rope_scaling so candle can parse it
+        // OOM FIX: cap max_position_embeddings to max_seq_len (default 2048).
+        // Phi-3-mini-128k has max_position_embeddings=131072. Candle pre-allocates
+        // the full RoPE cos/sin cache and KV cache at this size on the first forward
+        // pass, consuming ~8 GB on a T4 before any tokens are generated.
+        // The Python version avoids this via max_seq_length=2048 in from_pretrained().
+        // Our prompts are ~800-1200 tokens + 256 new tokens = well under 2048.
+        let capped = self.max_position_embeddings.min(max_seq_len);
+        if capped < self.max_position_embeddings {
+            println!("  max_position_embeddings capped: {} → {} (OOM prevention)",
+                self.max_position_embeddings, capped);
+        }
+
         let mut map = serde_json::json!({
             "vocab_size": self.vocab_size,
             "hidden_size": self.hidden_size,
@@ -116,7 +109,7 @@ impl RawPhi3Config {
             "num_attention_heads": self.num_attention_heads,
             "num_key_value_heads": self.num_key_value_heads,
             "hidden_act": self.hidden_act,
-            "max_position_embeddings": self.max_position_embeddings,
+            "max_position_embeddings": capped,
             "rms_norm_eps": self.rms_norm_eps,
             "rope_theta": self.rope_theta,
             "original_max_position_embeddings": self.original_max_position_embeddings,
@@ -131,10 +124,10 @@ impl RawPhi3Config {
     }
 }
 
-fn parse_phi3_config(json: &str) -> Result<Phi3Config> {
+fn parse_phi3_config(json: &str, max_seq_len: usize) -> Result<Phi3Config> {
     let raw: RawPhi3Config = serde_json::from_str(json)
         .context("Failed to parse config.json into RawPhi3Config")?;
-    raw.into_phi3_config()
+    raw.into_phi3_config(max_seq_len)
 }
 
 // ── ModelBundle ───────────────────────────────────────────────────────────────
@@ -149,6 +142,11 @@ pub struct ModelBundle {
 
 impl ModelBundle {
     pub async fn load(adapter_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
+        // OOM FIX: max_seq_len caps max_position_embeddings in the config.
+        // Matches Python's max_seq_length=2048. Our prompts are ~800-1200 tokens
+        // + 256 new tokens, so 2048 is safe. Increase only if you see truncation.
+        let max_seq_len: usize = 2048;
+
         let adapter_path = resolve_adapter_dir(Path::new(adapter_dir))?;
 
         // 1. Read LoRA config
@@ -162,7 +160,7 @@ impl ModelBundle {
         println!("  LoRA rank={} alpha={} scale={:.4}", cfg.r, cfg.lora_alpha, lora_scale);
         println!("  dtype      : {:?}", dtype);
 
-        // 2. Locate base model files (local HF cache first, then Hub download)
+        // 2. Locate base model files
         let base_files = find_or_download_base(&cfg.base_model_name_or_path).await?;
 
         // 3. Load base tensors
@@ -170,8 +168,8 @@ impl ModelBundle {
         let mut tensors = load_safetensors_map(&base_files, dtype, device)?;
         println!("  Base tensors loaded: {}", tensors.len());
 
-        // 4. Load and parse config.json — our parser handles both 4k and 128k formats
-        let config = load_model_config(&base_files, &cfg.base_model_name_or_path).await?;
+        // 4. Load config — pass max_seq_len to cap max_position_embeddings
+        let config = load_model_config(&base_files, &cfg.base_model_name_or_path, max_seq_len).await?;
 
         // 5. Apply LoRA deltas
         let adapter_st = adapter_path.join("adapter_model.safetensors");
@@ -190,8 +188,6 @@ impl ModelBundle {
             let b_key   = a_key.replace(".lora_A.weight", ".lora_B.weight");
             let Some(la) = lora_map.get(a_key.as_str()) else { continue };
             let Some(lb) = lora_map.get(&b_key)          else { continue };
-            // PEFT key: "base_model.model.<path>.lora_A.weight"
-            // Base key: "<path>.weight"
             let base_key = a_key
                 .trim_start_matches("base_model.model.")
                 .replace(".lora_A.weight", ".weight");
@@ -202,15 +198,17 @@ impl ModelBundle {
         }
         println!("  Merged {} LoRA modules", merged);
 
-        // FIX: drop lora_map immediately after merge to free ~500 MB of VRAM
+        // OOM FIX: drop lora_map immediately — frees ~500 MB VRAM
         drop(lora_map);
 
-        // 6. Build model (scoped so VarMap is freed before model is stored)
+        // OOM FIX: scope VarMap so it's freed before the built model is stored,
+        // avoiding two full copies of weights in VRAM simultaneously.
         let model = {
             let vmap = tensors_to_varmap(tensors)?;
             let vb   = VarBuilder::from_varmap(&vmap, dtype, device);
             Phi3Model::new(&config, vb)
                 .context("Failed to build Phi-3 model")?
+            // vmap dropped here
         };
 
         // 7. Tokenizer
@@ -253,8 +251,6 @@ pub fn solve_with_llm(
     for i in 0..n_samples {
         println!("  Sample {}/{} …", i + 1, n_samples);
 
-        // Clear KV cache before each sample so previous generation state
-        // doesn't corrupt the attention mask shapes for subsequent samples.
         bundle.model.clear_kv_cache();
 
         let text = generate(
@@ -294,11 +290,6 @@ fn generate(
     let mut gen = Vec::<u32>::new();
     let prompt_len = input_ids.len();
 
-    // KV-cache aware generation (mirrors candle's official phi3 example):
-    //   index=0 : feed full prompt with start_pos=0  → fills the KV cache
-    //   index>0 : feed only last token with start_pos=prompt_len+index-1
-    // Without this, the attention mask shape grows each step and causes a
-    // broadcast_add shape mismatch error.
     for index in 0..max_new_tokens {
         let (context, start_pos): (Vec<u32>, usize) = if index == 0 {
             (input_ids.to_vec(), 0)
@@ -309,7 +300,7 @@ fn generate(
         let input  = Tensor::new(context.as_slice(), device)?.unsqueeze(0)?;
         let logits = model.forward(&input, start_pos)?
             .squeeze(0)?.squeeze(0)?
-            .to_dtype(DType::F32)?; // always sample in F32 for numerical stability
+            .to_dtype(DType::F32)?;
 
         let next = sample_token(&logits, temperature, top_p, rng)?;
         gen.push(next);
@@ -333,7 +324,7 @@ fn sample_token(logits: &Tensor, temperature: f64, top_p: f64, rng: &mut impl Rn
         if cum as f64 >= top_p { break; }
     }
     let total: f32 = nucleus.iter().map(|(_, p)| p).sum();
-    // FIX: rand 0.9+ renamed gen() → random() to avoid conflict with Rust 2024 gen keyword
+    // FIX: rand 0.9+ renamed gen() → random()
     let u: f32     = rng.random::<f32>() * total;
     let mut acc    = 0f32;
     for &(i, p) in &nucleus { acc += p; if acc >= u { return Ok(i as u32); } }
@@ -341,47 +332,32 @@ fn sample_token(logits: &Tensor, temperature: f64, top_p: f64, rng: &mut impl Rn
 }
 
 // ── HF cache resolution ───────────────────────────────────────────────────────
-//
-// Hugging Face stores models at:
-//   $HF_HOME/hub/models--<org>--<n>/snapshots/<hash>/
-// or
-//   ~/.cache/huggingface/hub/models--<org>--<n>/snapshots/<hash>/
 
 fn hf_cache_root() -> PathBuf {
-    // Respect HF_HOME env var (set by transformers/unsloth in Colab)
     if let Ok(h) = std::env::var("HF_HOME") {
         return PathBuf::from(h).join("hub");
     }
-    // Respect HUGGINGFACE_HUB_CACHE (older env var)
     if let Ok(h) = std::env::var("HUGGINGFACE_HUB_CACHE") {
         return PathBuf::from(h);
     }
-    // Default
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     PathBuf::from(home).join(".cache/huggingface/hub")
 }
 
-/// Convert "org/name" → "models--org--name"
 fn repo_to_cache_dir(repo_id: &str) -> String {
     format!("models--{}", repo_id.replace('/', "--"))
 }
 
-/// Find the newest snapshot directory for a cached model.
-/// Returns None if the model is not in the local cache.
 fn find_cached_snapshot(repo_id: &str) -> Option<PathBuf> {
     let cache_root = hf_cache_root();
     let model_dir  = cache_root.join(repo_to_cache_dir(repo_id));
     let snapshots  = model_dir.join("snapshots");
-    if !snapshots.exists() {
-        return None;
-    }
-    // Pick the most recently modified snapshot
+    if !snapshots.exists() { return None; }
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&snapshots).ok()?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .map(|e| e.path())
         .collect();
-    // Sort by mtime descending; fall back to lexicographic
     entries.sort_by(|a, b| {
         let ma = a.metadata().and_then(|m| m.modified()).ok();
         let mb = b.metadata().and_then(|m| m.modified()).ok();
@@ -390,19 +366,14 @@ fn find_cached_snapshot(repo_id: &str) -> Option<PathBuf> {
     entries.into_iter().next()
 }
 
-/// Locate safetensors files in a snapshot directory.
 fn snapshot_weight_files(snap: &Path) -> Result<Vec<PathBuf>> {
-    // Try single file
     let single = snap.join("model.safetensors");
     if single.exists() { return Ok(vec![single]); }
-
-    // Try sharded index
     let index = snap.join("model.safetensors.index.json");
     if index.exists() {
         let txt  = std::fs::read_to_string(&index)?;
         let val: serde_json::Value = serde_json::from_str(&txt)?;
-        let wmap = val["weight_map"].as_object()
-            .context("weight_map missing")?;
+        let wmap = val["weight_map"].as_object().context("weight_map missing")?;
         let mut shards: Vec<String> = wmap.values()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
@@ -413,9 +384,7 @@ fn snapshot_weight_files(snap: &Path) -> Result<Vec<PathBuf>> {
     bail!("No safetensors weights found in snapshot '{}'", snap.display())
 }
 
-/// Find base model files: local cache → HF Hub download.
 async fn find_or_download_base(repo_id: &str) -> Result<Vec<PathBuf>> {
-    // Try local cache first
     if let Some(snap) = find_cached_snapshot(repo_id) {
         println!("  Cache hit  : {}", snap.display());
         match snapshot_weight_files(&snap) {
@@ -425,24 +394,15 @@ async fn find_or_download_base(repo_id: &str) -> Result<Vec<PathBuf>> {
     } else {
         println!("  No local cache for '{}', downloading from Hub…", repo_id);
     }
-
-    // Fall back to HF Hub
     download_from_hub(repo_id).await
 }
 
 async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
     use hf_hub::api::tokio::ApiBuilder;
-
-    let api = ApiBuilder::new()
-        .with_progress(true)
-        .build()
+    let api = ApiBuilder::new().with_progress(true).build()
         .context("Failed to build HF Hub API client")?;
     let repo = api.model(repo_id.to_string());
-
-    // Try single-file first
     if let Ok(p) = repo.get("model.safetensors").await { return Ok(vec![p]); }
-
-    // Sharded
     let idx = repo.get("model.safetensors.index.json").await
         .with_context(|| format!("Cannot fetch model weights from Hub for '{}'", repo_id))?;
     let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(idx)?)?;
@@ -450,7 +410,6 @@ async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
     let mut shards: Vec<String> = wmap.values()
         .filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
     shards.sort(); shards.dedup();
-
     let mut paths = Vec::new();
     for s in shards {
         paths.push(repo.get(&s).await
@@ -459,8 +418,7 @@ async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Load config.json from beside the weight files, or download from Hub.
-async fn load_model_config(base_files: &[PathBuf], repo_id: &str) -> Result<Phi3Config> {
+async fn load_model_config(base_files: &[PathBuf], repo_id: &str, max_seq_len: usize) -> Result<Phi3Config> {
     let json = if let Some(dir) = base_files.first().and_then(|p| p.parent()) {
         let cfg_path = dir.join("config.json");
         if cfg_path.exists() {
@@ -472,7 +430,7 @@ async fn load_model_config(base_files: &[PathBuf], repo_id: &str) -> Result<Phi3
     } else {
         download_config_json(repo_id).await?
     };
-    parse_phi3_config(&json)
+    parse_phi3_config(&json, max_seq_len)
 }
 
 async fn download_config_json(repo_id: &str) -> Result<String> {
@@ -485,9 +443,7 @@ async fn download_config_json(repo_id: &str) -> Result<String> {
     std::fs::read_to_string(p).context("Cannot read downloaded config.json")
 }
 
-/// Load tokenizer.json.
 async fn load_tokenizer(adapter_path: &Path, repo_id: &str) -> Result<Tokenizer> {
-    // 1. HF cache — original tokenizer from Microsoft, most reliable
     if let Some(snap) = find_cached_snapshot(repo_id) {
         let cached = snap.join("tokenizer.json");
         if cached.exists() {
@@ -498,7 +454,6 @@ async fn load_tokenizer(adapter_path: &Path, repo_id: &str) -> Result<Tokenizer>
             }
         }
     }
-    // 2. Adapter dir
     let local = adapter_path.join("tokenizer.json");
     if local.exists() {
         println!("  Tokenizer  : adapter dir");
@@ -507,7 +462,6 @@ async fn load_tokenizer(adapter_path: &Path, repo_id: &str) -> Result<Tokenizer>
             Err(e) => println!("  Adapter tokenizer load failed ({e}), downloading…"),
         }
     }
-    // 3. Download fresh from Hub
     println!("  Tokenizer  : downloading from Hub…");
     use hf_hub::api::tokio::ApiBuilder;
     let api  = ApiBuilder::new().with_progress(false).build()?;
