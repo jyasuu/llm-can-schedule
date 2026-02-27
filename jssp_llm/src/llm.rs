@@ -246,6 +246,11 @@ pub fn solve_with_llm(
 
     for i in 0..n_samples {
         println!("  Sample {}/{} …", i + 1, n_samples);
+
+        // Clear KV cache before each sample so previous generation state
+        // doesn't corrupt the attention mask shapes for subsequent samples.
+        bundle.model.clear_kv_cache();
+
         let text = generate(
             &mut bundle.model, &bundle.tokenizer, &input_ids,
             max_new_tokens, temperature, top_p, bundle.eos_token_id,
@@ -280,15 +285,28 @@ fn generate(
     device:         &Device,
     rng:            &mut impl Rng,
 ) -> Result<String> {
-    let mut ids = input_ids.to_vec();
     let mut gen = Vec::<u32>::new();
+    let prompt_len = input_ids.len();
 
-    for _ in 0..max_new_tokens {
-        let n   = ids.len();
-        let inp = Tensor::from_slice(ids.as_slice(), &[1usize, n], device)?;
-        let logits = model.forward(&inp, n - 1)?.squeeze(0)?.squeeze(0)?;
-        let next   = sample_token(&logits, temperature, top_p, rng)?;
-        ids.push(next); gen.push(next);
+    // KV-cache aware generation (mirrors candle's official phi3 example):
+    //   index=0 : feed full prompt with start_pos=0  → fills the KV cache
+    //   index>0 : feed only last token with start_pos=prompt_len+index-1
+    // Without this, the attention mask shape grows each step and causes a
+    // broadcast_add shape mismatch error.
+    for index in 0..max_new_tokens {
+        let (context, start_pos): (Vec<u32>, usize) = if index == 0 {
+            (input_ids.to_vec(), 0)
+        } else {
+            (vec![*gen.last().unwrap()], prompt_len + index - 1)
+        };
+
+        let input  = Tensor::new(context.as_slice(), device)?.unsqueeze(0)?;
+        let logits = model.forward(&input, start_pos)?
+            .squeeze(0)?.squeeze(0)?
+            .to_dtype(DType::F32)?; // always sample in F32 for numerical stability
+
+        let next = sample_token(&logits, temperature, top_p, rng)?;
+        gen.push(next);
         if next == eos_token_id { break; }
     }
     tokenizer.decode(&gen, true).map_err(|e| anyhow::anyhow!("Decode: {e}"))
