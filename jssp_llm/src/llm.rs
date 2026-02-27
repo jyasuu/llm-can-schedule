@@ -1,18 +1,12 @@
 // src/llm.rs
 //
-// Pure-Rust LLM inference via `candle`.
+// Loading strategy (in priority order):
+//   1. Look in the local HF Hub cache (~/.cache/huggingface/hub/) — works when
+//      the Python notebook already downloaded the base model.
+//   2. Fall back to downloading via the HF Hub API.
 //
-// Handles the real-world adapter directory layout produced by unsloth/PEFT:
-//   adapter_config.json        — LoRA hyper-params (rank, alpha, target modules…)
-//   adapter_model.safetensors  — LoRA delta weights only  (NOT a full model)
-//   tokenizer.json             — Phi-3 sentencepiece/Unigram tokenizer
-//
-// Because only LoRA deltas are present, we:
-//   1. Parse adapter_config.json to find the base model repo id.
-//   2. Download base model weights + config.json from HF Hub.
-//   3. Load all base tensors into memory.
-//   4. Apply LoRA math in-place:  W += (lora_B @ lora_A) * (alpha / rank)
-//   5. Build the Phi-3 model from the merged weight map.
+// This avoids the "relative URL without a base" error that occurs when
+// Api::new() can't resolve the endpoint in some Colab configurations.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +15,6 @@ use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{VarBuilder, VarMap};
 use candle_transformers::models::phi3::{Config as Phi3Config, Model as Phi3Model};
-use hf_hub::api::tokio::Api;
 use rand::prelude::*;
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -30,25 +23,20 @@ use crate::jssp::{validate, Schedule};
 use crate::parser::parse_output;
 use crate::prompt::build_prompt_for_jobs;
 
-// ── Device helper ─────────────────────────────────────────────────────────────
+// ── Device ───────────────────────────────────────────────────────────────────
 
 pub fn make_device(idx: i64) -> Result<Device> {
     if idx < 0 {
         Ok(Device::Cpu)
     } else {
         #[cfg(feature = "cuda")]
-        {
-            Ok(Device::new_cuda(idx as usize)?)
-        }
+        { Ok(Device::new_cuda(idx as usize)?) }
         #[cfg(not(feature = "cuda"))]
-        {
-            eprintln!("CUDA requested but not compiled in — falling back to CPU.");
-            Ok(Device::Cpu)
-        }
+        { eprintln!("CUDA not compiled in — using CPU."); Ok(Device::Cpu) }
     }
 }
 
-// ── adapter_config.json schema ────────────────────────────────────────────────
+// ── adapter_config.json ───────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct AdapterConfig {
@@ -60,10 +48,10 @@ struct AdapterConfig {
 // ── ModelBundle ───────────────────────────────────────────────────────────────
 
 pub struct ModelBundle {
-    pub model: Phi3Model,
-    pub tokenizer: Tokenizer,
+    pub model:        Phi3Model,
+    pub tokenizer:    Tokenizer,
     #[allow(dead_code)]
-    pub config: Phi3Config,
+    pub config:       Phi3Config,
     pub eos_token_id: u32,
 }
 
@@ -71,44 +59,32 @@ impl ModelBundle {
     pub async fn load(adapter_dir: &str, device: &Device) -> Result<Self> {
         let adapter_path = resolve_adapter_dir(Path::new(adapter_dir))?;
 
-        // ── 1. Parse adapter_config.json ──────────────────────────────────────
-        let adapter_cfg_path = adapter_path.join("adapter_config.json");
-        if !adapter_cfg_path.exists() {
-            bail!("adapter_config.json not found in '{}'", adapter_path.display());
-        }
-        let adapter_cfg: AdapterConfig =
-            serde_json::from_str(&std::fs::read_to_string(&adapter_cfg_path)?)
-                .context("Failed to parse adapter_config.json")?;
+        // 1. Read LoRA config
+        let cfg: AdapterConfig = serde_json::from_str(
+            &std::fs::read_to_string(adapter_path.join("adapter_config.json"))
+                .context("Cannot read adapter_config.json")?
+        ).context("Cannot parse adapter_config.json")?;
 
-        let base_repo  = &adapter_cfg.base_model_name_or_path;
-        let lora_scale = adapter_cfg.lora_alpha / adapter_cfg.r as f64;
-        println!("  Base model : {}", base_repo);
-        println!("  LoRA rank={} alpha={} scale={:.4}",
-            adapter_cfg.r, adapter_cfg.lora_alpha, lora_scale);
+        let lora_scale = cfg.lora_alpha / cfg.r as f64;
+        println!("  Base model : {}", cfg.base_model_name_or_path);
+        println!("  LoRA rank={} alpha={} scale={:.4}", cfg.r, cfg.lora_alpha, lora_scale);
 
-        // ── 2. Download base model from HF Hub ────────────────────────────────
-        println!("  Fetching base model weights from HF Hub (cached after first run)…");
-        let api  = Api::new().context("Failed to init HF Hub API")?;
-        let repo = api.model(base_repo.clone());
-
-        let config_path = repo.get("config.json").await
-            .with_context(|| format!("Cannot fetch config.json from {}", base_repo))?;
-        let config: Phi3Config =
-            serde_json::from_str(&std::fs::read_to_string(&config_path)?)
-                .context("Cannot parse config.json")?;
-
-        let base_files = download_base_weights(&repo).await
-            .with_context(|| format!("Cannot fetch weights from {}", base_repo))?;
-        println!("  Base shards: {}", base_files.len());
-
-        // ── 3. Load base tensors ───────────────────────────────────────────────
+        // 2. Locate base model files (cache first, then Hub download)
         let dtype = if device.is_cuda() { DType::BF16 } else { DType::F32 };
-        let mut tensors = load_safetensors_map(&base_files, dtype, device)?;
+        let base_files = find_or_download_base(&cfg.base_model_name_or_path).await?;
 
-        // ── 4. Load & apply LoRA deltas ───────────────────────────────────────
+        // 3. Load base tensors
+        println!("  Loading {} base shard(s)…", base_files.len());
+        let mut tensors = load_safetensors_map(&base_files, dtype, device)?;
+        println!("  Base tensors loaded: {}", tensors.len());
+
+        // 4. Load config.json (look next to first shard, or download)
+        let config = load_model_config(&base_files, &cfg.base_model_name_or_path).await?;
+
+        // 5. Apply LoRA deltas
         let adapter_st = adapter_path.join("adapter_model.safetensors");
         if !adapter_st.exists() {
-            bail!("adapter_model.safetensors not found in '{}'", adapter_path.display());
+            bail!("adapter_model.safetensors missing in '{}'", adapter_path.display());
         }
         let lora_map = load_safetensors_map(&[&adapter_st], dtype, device)?;
         println!("  LoRA tensors: {}", lora_map.len());
@@ -116,39 +92,34 @@ impl ModelBundle {
         let mut merged = 0usize;
         let a_keys: Vec<String> = lora_map.keys()
             .filter(|k| k.ends_with(".lora_A.weight"))
-            .cloned()
-            .collect();
+            .cloned().collect();
 
         for a_key in &a_keys {
-            let b_key  = a_key.replace(".lora_A.weight", ".lora_B.weight");
-            let Some(lora_a) = lora_map.get(a_key.as_str()) else { continue };
-            let Some(lora_b) = lora_map.get(&b_key)          else { continue };
-
-            // PEFT prefix: "base_model.model.<path>.lora_A.weight"
-            // Base key:    "<path>.weight"
+            let b_key   = a_key.replace(".lora_A.weight", ".lora_B.weight");
+            let Some(la) = lora_map.get(a_key.as_str()) else { continue };
+            let Some(lb) = lora_map.get(&b_key)          else { continue };
+            // PEFT key: "base_model.model.<path>.lora_A.weight"
+            // Base key: "<path>.weight"
             let base_key = a_key
                 .trim_start_matches("base_model.model.")
                 .replace(".lora_A.weight", ".weight");
-
             let Some(w) = tensors.get(&base_key) else { continue };
-
-            // delta = (lora_B @ lora_A) * scale
-            let delta = lora_b.matmul(lora_a)?.affine(lora_scale, 0.0)?;
+            let delta = lb.matmul(la)?.affine(lora_scale, 0.0)?;
             tensors.insert(base_key, (w + delta)?);
             merged += 1;
         }
-        println!("  Merged {} LoRA module(s)", merged);
+        println!("  Merged {} LoRA modules", merged);
 
-        // ── 5. Build Phi-3 model ───────────────────────────────────────────────
-        let vmap = tensors_to_varmap(tensors)?;
-        let vb   = VarBuilder::from_varmap(&vmap, dtype, device);
+        // 6. Build model
+        let vmap  = tensors_to_varmap(tensors)?;
+        let vb    = VarBuilder::from_varmap(&vmap, dtype, device);
         let model = Phi3Model::new(&config, vb)
-            .context("Failed to construct Phi-3 model")?;
+            .context("Failed to build Phi-3 model")?;
 
-        // ── 6. Tokenizer ───────────────────────────────────────────────────────
-        let tokenizer = load_tokenizer(&adapter_path, &repo).await?;
+        // 7. Tokenizer
+        let tokenizer    = load_tokenizer(&adapter_path, &cfg.base_model_name_or_path).await?;
         let eos_token_id = find_eos(&tokenizer);
-        println!("  EOS id     : {}", eos_token_id);
+        println!("  EOS token id : {}", eos_token_id);
 
         Ok(Self { model, tokenizer, config, eos_token_id })
     }
@@ -174,12 +145,12 @@ pub fn solve_with_llm(
     let prompt   = build_prompt_for_jobs(jobs);
     let encoding = bundle.tokenizer
         .encode(prompt.as_str(), true)
-        .map_err(|e| anyhow::anyhow!("Tokenisation error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Tokenise error: {e}"))?;
     let input_ids: Vec<u32> = encoding.get_ids().to_vec();
 
-    let mut best:        Option<LlmResult> = None;
-    let mut valid_count: usize = 0;
-    let mut rng = rand::rng();
+    let mut best:  Option<LlmResult> = None;
+    let mut valid: usize = 0;
+    let mut rng = rand::thread_rng();
 
     for i in 0..n_samples {
         println!("  Sample {}/{} …", i + 1, n_samples);
@@ -190,22 +161,21 @@ pub fn solve_with_llm(
         )?;
         println!("    raw: {}", text.chars().take(120).collect::<String>());
 
-        let Some(schedule) = parse_output(&text, jobs) else {
-            println!("    → parse failed"); continue;
-        };
-        let (ok, ms) = validate(jobs, &schedule);
+        let Some(sched) = parse_output(&text, jobs)
+            else { println!("    → parse failed"); continue; };
+        let (ok, ms) = validate(jobs, &sched);
         if !ok { println!("    → constraint violation"); continue; }
 
-        valid_count += 1;
+        valid += 1;
         if best.as_ref().map_or(true, |b| ms < b.makespan) {
-            best = Some(LlmResult { makespan: ms, start_times: schedule, text });
+            best = Some(LlmResult { makespan: ms, start_times: sched, text });
         }
         println!("    ✓ makespan = {}", ms);
     }
-    Ok((best, valid_count))
+    Ok((best, valid))
 }
 
-// ── Generation loop ───────────────────────────────────────────────────────────
+// ── Generation ────────────────────────────────────────────────────────────────
 
 fn generate(
     model:          &mut Phi3Model,
@@ -218,33 +188,21 @@ fn generate(
     device:         &Device,
     rng:            &mut impl Rng,
 ) -> Result<String> {
-    let mut ids  = input_ids.to_vec();
-    let mut gen  = Vec::<u32>::new();
+    let mut ids = input_ids.to_vec();
+    let mut gen = Vec::<u32>::new();
 
     for _ in 0..max_new_tokens {
         let n   = ids.len();
         let inp = Tensor::from_slice(ids.as_slice(), &[1usize, n], device)?;
-        // forward(input_ids, start_pos) — start_pos selects which position's logits to return
-        let logits = model.forward(&inp, n - 1)?
-            .squeeze(0)?.squeeze(0)?;          // [vocab_size]
-        let next = sample_token(&logits, temperature, top_p, rng)?;
-        ids.push(next);
-        gen.push(next);
+        let logits = model.forward(&inp, n - 1)?.squeeze(0)?.squeeze(0)?;
+        let next   = sample_token(&logits, temperature, top_p, rng)?;
+        ids.push(next); gen.push(next);
         if next == eos_token_id { break; }
     }
-
-    tokenizer.decode(&gen, true)
-        .map_err(|e| anyhow::anyhow!("Decode error: {e}"))
+    tokenizer.decode(&gen, true).map_err(|e| anyhow::anyhow!("Decode: {e}"))
 }
 
-// ── Nucleus sampling ──────────────────────────────────────────────────────────
-
-fn sample_token(
-    logits:      &Tensor,
-    temperature: f64,
-    top_p:       f64,
-    rng:         &mut impl Rng,
-) -> Result<u32> {
+fn sample_token(logits: &Tensor, temperature: f64, top_p: f64, rng: &mut impl Rng) -> Result<u32> {
     let logits = (logits / temperature)?;
     let probs  = candle_nn::ops::softmax(&logits, 0)?;
     let pv: Vec<f32> = probs.to_vec1()?;
@@ -253,73 +211,195 @@ fn sample_token(
     idx.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     let mut cum = 0f32;
-    let mut nucleus = Vec::new();
+    let mut nucleus: Vec<(usize, f32)> = Vec::new();
     for &(i, p) in &idx {
-        nucleus.push((i, p));
-        cum += p;
+        nucleus.push((i, p)); cum += p;
         if cum as f64 >= top_p { break; }
     }
-
     let total: f32 = nucleus.iter().map(|(_, p)| p).sum();
-    let u: f32     = rng.random::<f32>() * total;
+    let u: f32     = rng.gen::<f32>() * total;
     let mut acc    = 0f32;
-    for &(i, p) in &nucleus {
-        acc += p;
-        if acc >= u { return Ok(i as u32); }
-    }
+    for &(i, p) in &nucleus { acc += p; if acc >= u { return Ok(i as u32); } }
     Ok(idx[0].0 as u32)
 }
 
-// ── HF Hub helpers ────────────────────────────────────────────────────────────
+// ── HF cache resolution ───────────────────────────────────────────────────────
+//
+// Hugging Face stores models at:
+//   $HF_HOME/hub/models--<org>--<name>/snapshots/<hash>/
+// or
+//   ~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<hash>/
 
-async fn download_base_weights(
-    repo: &hf_hub::api::tokio::ApiRepo,
-) -> Result<Vec<PathBuf>> {
-    // Single-file model
-    if let Ok(p) = repo.get("model.safetensors").await {
-        return Ok(vec![p]);
+fn hf_cache_root() -> PathBuf {
+    // Respect HF_HOME env var (set by transformers/unsloth in Colab)
+    if let Ok(h) = std::env::var("HF_HOME") {
+        return PathBuf::from(h).join("hub");
     }
-    // Sharded model — read the index to discover shard filenames
-    let idx_path = repo.get("model.safetensors.index.json").await
-        .context("model.safetensors and model.safetensors.index.json both absent")?;
-    let idx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(idx_path)?)?;
-    let wmap = idx["weight_map"].as_object()
-        .context("weight_map key missing in shard index")?;
-    let mut shards: Vec<String> = wmap.values()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+    // Respect HUGGINGFACE_HUB_CACHE (older env var)
+    if let Ok(h) = std::env::var("HUGGINGFACE_HUB_CACHE") {
+        return PathBuf::from(h);
+    }
+    // Default
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    PathBuf::from(home).join(".cache/huggingface/hub")
+}
+
+/// Convert "org/name" → "models--org--name"
+fn repo_to_cache_dir(repo_id: &str) -> String {
+    format!("models--{}", repo_id.replace('/', "--"))
+}
+
+/// Find the newest snapshot directory for a cached model.
+/// Returns None if the model is not in the local cache.
+fn find_cached_snapshot(repo_id: &str) -> Option<PathBuf> {
+    let cache_root = hf_cache_root();
+    let model_dir  = cache_root.join(repo_to_cache_dir(repo_id));
+    let snapshots  = model_dir.join("snapshots");
+    if !snapshots.exists() {
+        return None;
+    }
+    // Pick the most recently modified snapshot
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&snapshots).ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path())
         .collect();
+    // Sort by mtime descending; fall back to lexicographic
+    entries.sort_by(|a, b| {
+        let ma = a.metadata().and_then(|m| m.modified()).ok();
+        let mb = b.metadata().and_then(|m| m.modified()).ok();
+        mb.cmp(&ma)
+    });
+    entries.into_iter().next()
+}
+
+/// Locate safetensors files in a snapshot directory.
+fn snapshot_weight_files(snap: &Path) -> Result<Vec<PathBuf>> {
+    // Try single file
+    let single = snap.join("model.safetensors");
+    if single.exists() { return Ok(vec![single]); }
+
+    // Try sharded index
+    let index = snap.join("model.safetensors.index.json");
+    if index.exists() {
+        let txt  = std::fs::read_to_string(&index)?;
+        let val: serde_json::Value = serde_json::from_str(&txt)?;
+        let wmap = val["weight_map"].as_object()
+            .context("weight_map missing")?;
+        let mut shards: Vec<String> = wmap.values()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        shards.sort(); shards.dedup();
+        let paths: Vec<PathBuf> = shards.iter().map(|s| snap.join(s)).collect();
+        if paths.iter().all(|p| p.exists()) { return Ok(paths); }
+    }
+    bail!("No safetensors weights found in snapshot '{}'", snap.display())
+}
+
+/// Find base model files: local cache → HF Hub download.
+async fn find_or_download_base(repo_id: &str) -> Result<Vec<PathBuf>> {
+    // Try local cache first
+    if let Some(snap) = find_cached_snapshot(repo_id) {
+        println!("  Cache hit  : {}", snap.display());
+        match snapshot_weight_files(&snap) {
+            Ok(files) => return Ok(files),
+            Err(e)    => println!("  Cache incomplete ({e}), falling back to Hub…"),
+        }
+    } else {
+        println!("  No local cache for '{}', downloading from Hub…", repo_id);
+    }
+
+    // Fall back to HF Hub
+    download_from_hub(repo_id).await
+}
+
+async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
+    use hf_hub::api::tokio::ApiBuilder;
+
+    let api = ApiBuilder::new()
+        .with_progress(true)
+        .build()
+        .context("Failed to build HF Hub API client")?;
+    let repo = api.model(repo_id.to_string());
+
+    // Try single-file first
+    if let Ok(p) = repo.get("model.safetensors").await { return Ok(vec![p]); }
+
+    // Sharded
+    let idx = repo.get("model.safetensors.index.json").await
+        .with_context(|| format!("Cannot fetch model weights from Hub for '{}'", repo_id))?;
+    let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(idx)?)?;
+    let wmap = val["weight_map"].as_object().context("weight_map missing in shard index")?;
+    let mut shards: Vec<String> = wmap.values()
+        .filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
     shards.sort(); shards.dedup();
 
     let mut paths = Vec::new();
-    for shard in shards {
-        paths.push(repo.get(&shard).await
-            .with_context(|| format!("Failed to download shard {}", shard))?);
+    for s in shards {
+        paths.push(repo.get(&s).await
+            .with_context(|| format!("Cannot download shard '{}'", s))?);
     }
     Ok(paths)
 }
 
-async fn load_tokenizer(
-    adapter_path: &Path,
-    repo: &hf_hub::api::tokio::ApiRepo,
-) -> Result<Tokenizer> {
-    let local = adapter_path.join("tokenizer.json");
-    let path = if local.exists() {
-        println!("  Tokenizer  : local ({})", local.display());
-        local
-    } else {
-        println!("  Tokenizer  : downloading from Hub…");
-        repo.get("tokenizer.json").await
-            .context("Cannot download tokenizer.json from Hub")?
-    };
-    Tokenizer::from_file(&path)
-        .map_err(|e| anyhow::anyhow!(
-            "Tokenizer load failed: {e}\n\
-             Make sure Cargo.toml has: tokenizers = {{ version = \"0.15\" }}\n\
-             Then run: cargo clean && cargo build --release"
-        ))
+/// Load config.json: look beside the weight files, then Hub.
+async fn load_model_config(base_files: &[PathBuf], repo_id: &str) -> Result<Phi3Config> {
+    // The config.json should be in the same directory as the weight files
+    if let Some(dir) = base_files.first().and_then(|p| p.parent()) {
+        let cfg_path = dir.join("config.json");
+        if cfg_path.exists() {
+            println!("  Config     : {} (local)", cfg_path.display());
+            return serde_json::from_str(&std::fs::read_to_string(&cfg_path)?)
+                .context("Cannot parse config.json");
+        }
+    }
+    // Fall back to downloading
+    println!("  Config     : downloading config.json…");
+    use hf_hub::api::tokio::ApiBuilder;
+    let api  = ApiBuilder::new().with_progress(false).build()?;
+    let repo = api.model(repo_id.to_string());
+    let p    = repo.get("config.json").await
+        .with_context(|| format!("Cannot fetch config.json from '{}'", repo_id))?;
+    serde_json::from_str(&std::fs::read_to_string(p)?)
+        .context("Cannot parse config.json")
 }
 
-// ── Tensor utilities ──────────────────────────────────────────────────────────
+/// Load tokenizer.json: local adapter dir → HF cache → Hub download.
+async fn load_tokenizer(adapter_path: &Path, repo_id: &str) -> Result<Tokenizer> {
+    // 1. Local adapter dir (our zip contains tokenizer.json)
+    let local = adapter_path.join("tokenizer.json");
+    if local.exists() {
+        println!("  Tokenizer  : local adapter dir");
+        return load_tok_file(&local);
+    }
+    // 2. HF cache snapshot
+    if let Some(snap) = find_cached_snapshot(repo_id) {
+        let cached = snap.join("tokenizer.json");
+        if cached.exists() {
+            println!("  Tokenizer  : HF cache ({})", cached.display());
+            return load_tok_file(&cached);
+        }
+    }
+    // 3. Download
+    println!("  Tokenizer  : downloading from Hub…");
+    use hf_hub::api::tokio::ApiBuilder;
+    let api  = ApiBuilder::new().with_progress(false).build()?;
+    let repo = api.model(repo_id.to_string());
+    let p    = repo.get("tokenizer.json").await
+        .context("Cannot download tokenizer.json")?;
+    load_tok_file(&p)
+}
+
+fn load_tok_file(path: &Path) -> Result<Tokenizer> {
+    Tokenizer::from_file(path).map_err(|e| anyhow::anyhow!(
+        "Tokenizer load failed for '{}': {e}\n\
+         Ensure Cargo.toml has: tokenizers = {{ version = \"0.15\", \
+         default-features = false, features = [\"onig\"] }}",
+        path.display()
+    ))
+}
+
+// ── Tensor / VarMap ───────────────────────────────────────────────────────────
 
 fn load_safetensors_map(
     files:  &[impl AsRef<Path>],
@@ -328,8 +408,7 @@ fn load_safetensors_map(
 ) -> Result<HashMap<String, Tensor>> {
     let mut map = HashMap::new();
     for f in files {
-        let loaded = candle_core::safetensors::load(f.as_ref(), device)?;
-        for (name, t) in loaded {
+        for (name, t) in candle_core::safetensors::load(f.as_ref(), device)? {
             map.insert(name, t.to_dtype(dtype)?);
         }
     }
@@ -355,9 +434,7 @@ fn resolve_adapter_dir(path: &Path) -> Result<PathBuf> {
     }
     let subs: Vec<_> = std::fs::read_dir(path)
         .with_context(|| format!("Cannot open '{}'", path.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
+        .filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).collect();
     if subs.len() == 1 {
         let sub = subs[0].path();
         if sub.join("adapter_config.json").exists() || sub.join("config.json").exists() {
@@ -365,10 +442,8 @@ fn resolve_adapter_dir(path: &Path) -> Result<PathBuf> {
             return Ok(sub);
         }
     }
-    bail!("adapter_config.json not found in '{}' or subdirectories", path.display())
+    bail!("adapter_config.json not found in '{}'", path.display())
 }
-
-// ── EOS helpers ───────────────────────────────────────────────────────────────
 
 fn find_eos(tok: &Tokenizer) -> u32 {
     for name in &["<|end|>", "<|endoftext|>", "</s>"] {
