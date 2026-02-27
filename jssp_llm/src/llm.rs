@@ -47,8 +47,6 @@ struct AdapterConfig {
     lora_alpha: f64,
 }
 
-// ── Custom config deserializer that handles both 4k and 128k ─────────────────
-
 #[derive(Debug, Deserialize)]
 struct RawPhi3Config {
     vocab_size: usize,
@@ -76,6 +74,16 @@ fn default_rms_norm_eps() -> f64 { 1e-5 }
 fn default_original_max_pos() -> usize { 4096 }
 
 impl RawPhi3Config {
+    // OOM FIX 1: max_seq_len parameter caps max_position_embeddings.
+    //
+    // Phi-3-mini-128k has max_position_embeddings=131072. Candle pre-allocates
+    // the full RoPE cos/sin cache AND the KV cache at this size on the first
+    // forward pass:
+    //   32 layers × 2 (K+V) × 32 heads × 96 dim × 131072 × 2 bytes = ~12.9 GB
+    // This OOMs even after the model weights fit in VRAM.
+    //
+    // Python avoids this via max_seq_length=2048 in FastLanguageModel.from_pretrained().
+    // We mirror that here. Our prompts are ~800-1200 tokens + 256 new = well under 2048.
     fn into_phi3_config(self, max_seq_len: usize) -> Result<Phi3Config> {
         let rope_scaling: Option<String> = match &self.rope_scaling {
             serde_json::Value::String(s) => Some(s.clone()),
@@ -89,12 +97,6 @@ impl RawPhi3Config {
             }
         };
 
-        // OOM FIX: cap max_position_embeddings to max_seq_len (default 2048).
-        // Phi-3-mini-128k has max_position_embeddings=131072. Candle pre-allocates
-        // the full RoPE cos/sin cache and KV cache at this size on the first forward
-        // pass, consuming ~8 GB on a T4 before any tokens are generated.
-        // The Python version avoids this via max_seq_length=2048 in from_pretrained().
-        // Our prompts are ~800-1200 tokens + 256 new tokens = well under 2048.
         let capped = self.max_position_embeddings.min(max_seq_len);
         if capped < self.max_position_embeddings {
             println!("  max_position_embeddings capped: {} → {} (OOM prevention)",
@@ -102,25 +104,23 @@ impl RawPhi3Config {
         }
 
         let mut map = serde_json::json!({
-            "vocab_size": self.vocab_size,
-            "hidden_size": self.hidden_size,
-            "intermediate_size": self.intermediate_size,
-            "num_hidden_layers": self.num_hidden_layers,
-            "num_attention_heads": self.num_attention_heads,
-            "num_key_value_heads": self.num_key_value_heads,
-            "hidden_act": self.hidden_act,
-            "max_position_embeddings": capped,
-            "rms_norm_eps": self.rms_norm_eps,
-            "rope_theta": self.rope_theta,
+            "vocab_size":                       self.vocab_size,
+            "hidden_size":                      self.hidden_size,
+            "intermediate_size":                self.intermediate_size,
+            "num_hidden_layers":                self.num_hidden_layers,
+            "num_attention_heads":              self.num_attention_heads,
+            "num_key_value_heads":              self.num_key_value_heads,
+            "hidden_act":                       self.hidden_act,
+            "max_position_embeddings":          capped,   // ← capped here
+            "rms_norm_eps":                     self.rms_norm_eps,
+            "rope_theta":                       self.rope_theta,
             "original_max_position_embeddings": self.original_max_position_embeddings,
         });
         if let Some(rs) = rope_scaling {
             map["rope_scaling"] = serde_json::Value::String(rs);
         }
 
-        serde_json::from_value(map).context(
-            "Failed to construct Phi3Config from normalized fields"
-        )
+        serde_json::from_value(map).context("Failed to construct Phi3Config")
     }
 }
 
@@ -142,14 +142,12 @@ pub struct ModelBundle {
 
 impl ModelBundle {
     pub async fn load(adapter_dir: &str, device: &Device, dtype: DType) -> Result<Self> {
-        // OOM FIX: max_seq_len caps max_position_embeddings in the config.
-        // Matches Python's max_seq_length=2048. Our prompts are ~800-1200 tokens
-        // + 256 new tokens, so 2048 is safe. Increase only if you see truncation.
+        // Mirrors Python's max_seq_length=2048. Caps max_position_embeddings
+        // so the KV+RoPE cache is ~200 MB instead of ~12.9 GB on Phi-3-128k.
         let max_seq_len: usize = 2048;
 
         let adapter_path = resolve_adapter_dir(Path::new(adapter_dir))?;
 
-        // 1. Read LoRA config
         let cfg: AdapterConfig = serde_json::from_str(
             &std::fs::read_to_string(adapter_path.join("adapter_config.json"))
                 .context("Cannot read adapter_config.json")?
@@ -160,18 +158,15 @@ impl ModelBundle {
         println!("  LoRA rank={} alpha={} scale={:.4}", cfg.r, cfg.lora_alpha, lora_scale);
         println!("  dtype      : {:?}", dtype);
 
-        // 2. Locate base model files
         let base_files = find_or_download_base(&cfg.base_model_name_or_path).await?;
 
-        // 3. Load base tensors
         println!("  Loading {} base shard(s)…", base_files.len());
         let mut tensors = load_safetensors_map(&base_files, dtype, device)?;
         println!("  Base tensors loaded: {}", tensors.len());
 
-        // 4. Load config — pass max_seq_len to cap max_position_embeddings
+        // Pass max_seq_len so config caps max_position_embeddings
         let config = load_model_config(&base_files, &cfg.base_model_name_or_path, max_seq_len).await?;
 
-        // 5. Apply LoRA deltas
         let adapter_st = adapter_path.join("adapter_model.safetensors");
         if !adapter_st.exists() {
             bail!("adapter_model.safetensors missing in '{}'", adapter_path.display());
@@ -185,7 +180,7 @@ impl ModelBundle {
             .cloned().collect();
 
         for a_key in &a_keys {
-            let b_key   = a_key.replace(".lora_A.weight", ".lora_B.weight");
+            let b_key    = a_key.replace(".lora_A.weight", ".lora_B.weight");
             let Some(la) = lora_map.get(a_key.as_str()) else { continue };
             let Some(lb) = lora_map.get(&b_key)          else { continue };
             let base_key = a_key
@@ -198,20 +193,19 @@ impl ModelBundle {
         }
         println!("  Merged {} LoRA modules", merged);
 
-        // OOM FIX: drop lora_map immediately — frees ~500 MB VRAM
+        // OOM FIX 2: free lora_map immediately — ~500 MB freed before model build
         drop(lora_map);
 
-        // OOM FIX: scope VarMap so it's freed before the built model is stored,
-        // avoiding two full copies of weights in VRAM simultaneously.
+        // OOM FIX 3: scope VarMap so it's freed right after Phi3Model::new()
+        // takes ownership of the weights. Without this, VarMap (a full copy of
+        // all tensors) lives alongside the built model until end of load().
         let model = {
             let vmap = tensors_to_varmap(tensors)?;
             let vb   = VarBuilder::from_varmap(&vmap, dtype, device);
-            Phi3Model::new(&config, vb)
-                .context("Failed to build Phi-3 model")?
-            // vmap dropped here
+            Phi3Model::new(&config, vb).context("Failed to build Phi-3 model")?
+            // vmap dropped here, freeing the duplicate tensor copies
         };
 
-        // 7. Tokenizer
         let tokenizer    = load_tokenizer(&adapter_path, &cfg.base_model_name_or_path).await?;
         let eos_token_id = find_eos(&tokenizer);
         println!("  EOS token id : {}", eos_token_id);
@@ -245,12 +239,11 @@ pub fn solve_with_llm(
 
     let mut best:  Option<LlmResult> = None;
     let mut valid: usize = 0;
-    // FIX: rand 0.9+ renamed thread_rng() → rng()
+    // OOM FIX 4 (also warning fix): rand 0.9 renamed thread_rng() → rng()
     let mut rng = rand::rng();
 
     for i in 0..n_samples {
         println!("  Sample {}/{} …", i + 1, n_samples);
-
         bundle.model.clear_kv_cache();
 
         let text = generate(
@@ -324,9 +317,9 @@ fn sample_token(logits: &Tensor, temperature: f64, top_p: f64, rng: &mut impl Rn
         if cum as f64 >= top_p { break; }
     }
     let total: f32 = nucleus.iter().map(|(_, p)| p).sum();
-    // FIX: rand 0.9+ renamed gen() → random()
-    let u: f32     = rng.random::<f32>() * total;
-    let mut acc    = 0f32;
+    // OOM FIX 4 (also warning fix): rand 0.9 renamed gen() → random()
+    let u: f32 = rng.random::<f32>() * total;
+    let mut acc = 0f32;
     for &(i, p) in &nucleus { acc += p; if acc >= u { return Ok(i as u32); } }
     Ok(idx[0].0 as u32)
 }
@@ -399,7 +392,7 @@ async fn find_or_download_base(repo_id: &str) -> Result<Vec<PathBuf>> {
 
 async fn download_from_hub(repo_id: &str) -> Result<Vec<PathBuf>> {
     use hf_hub::api::tokio::ApiBuilder;
-    let api = ApiBuilder::new().with_progress(true).build()
+    let api  = ApiBuilder::new().with_progress(true).build()
         .context("Failed to build HF Hub API client")?;
     let repo = api.model(repo_id.to_string());
     if let Ok(p) = repo.get("model.safetensors").await { return Ok(vec![p]); }
@@ -473,10 +466,7 @@ async fn load_tokenizer(adapter_path: &Path, repo_id: &str) -> Result<Tokenizer>
 
 fn load_tok_file(path: &Path) -> Result<Tokenizer> {
     Tokenizer::from_file(path).map_err(|e| anyhow::anyhow!(
-        "Tokenizer load failed for '{}': {e}\n\
-         Ensure Cargo.toml has: tokenizers = {{ version = \"0.15\", \
-         default-features = false, features = [\"onig\"] }}",
-        path.display()
+        "Tokenizer load failed for '{}': {e}", path.display()
     ))
 }
 
